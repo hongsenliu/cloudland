@@ -11,7 +11,6 @@
     owner: centos
   with_items:
     - /opt/cloudland
-    - /usr/local
   tags: [sync]
 
 - name: synchronize cloudland and grpc
@@ -21,7 +20,6 @@
     rsync_opts: "--exclude=cache,--exclude=log,--exclude=db"
   with_items:
     - {src: '/opt/cloudland', dest: '/opt', owner: 'centos'}
-    - {src: '/usr/local', dest: '/usr', owner: 'centos'}
   tags: [sync]
 
 - name: copy sci binaries
@@ -39,6 +37,7 @@
   with_items:
     - {src: 'cloudlet.service', dest: '/lib/systemd/system', owner: 'root'}
     - {src: 'scid.service', dest: '/lib/systemd/system', owner: 'root'}
+    - {src: 'recover_onboot.service', dest: '/lib/systemd/system', owner: 'root'}
   tags: [be_srv]
 
 - name: create cloudlet environment file
@@ -62,4 +61,5 @@
     - 'NetworkManager'
     - 'scid'
     - 'cloudlet'
+    - 'recover_boot'
   tags: [be_srv]
