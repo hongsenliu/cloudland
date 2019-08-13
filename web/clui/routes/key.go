@@ -2,11 +2,13 @@
 Copyright <holder> All Rights Reserved.
 
 SPDX-License-Identifier: Apache-2.0
+
 */
 
 package routes
 
 import (
+	"context"
 	"log"
 	"net/http"
 	"strconv"
@@ -25,9 +27,10 @@ var (
 type KeyAdmin struct{}
 type KeyView struct{}
 
-func (a *KeyAdmin) Create(name, pubkey string) (key *model.Key, err error) {
+func (a *KeyAdmin) Create(ctx context.Context, name, pubkey string) (key *model.Key, err error) {
+	memberShip := GetMemberShip(ctx)
 	db := DB()
-	key = &model.Key{Name: name, PublicKey: pubkey}
+	key = &model.Key{Model: model.Model{Creater: memberShip.UserID, Owner: memberShip.OrgID}, Name: name, PublicKey: pubkey}
 	err = db.Create(key).Error
 	if err != nil {
 		log.Println("DB failed to create key, %v", err)
@@ -53,7 +56,8 @@ func (a *KeyAdmin) Delete(id int64) (err error) {
 	return
 }
 
-func (a *KeyAdmin) List(offset, limit int64, order string) (total int64, keys []*model.Key, err error) {
+func (a *KeyAdmin) List(ctx context.Context, offset, limit int64, order string) (total int64, keys []*model.Key, err error) {
+	memberShip := GetMemberShip(ctx)
 	db := DB()
 	if limit == 0 {
 		limit = 20
@@ -63,13 +67,14 @@ func (a *KeyAdmin) List(offset, limit int64, order string) (total int64, keys []
 		order = "created_at"
 	}
 
+	where := memberShip.GetWhere()
 	keys = []*model.Key{}
-	if err = db.Model(&model.Key{}).Count(&total).Error; err != nil {
+	if err = db.Model(&model.Key{}).Where(where).Count(&total).Error; err != nil {
 		log.Println("DB failed to count keys, %v", err)
 		return
 	}
 	db = dbs.Sortby(db.Offset(offset).Limit(limit), order)
-	if err = db.Find(&keys).Error; err != nil {
+	if err = db.Where(where).Find(&keys).Error; err != nil {
 		log.Println("DB failed to query keys, %v", err)
 		return
 	}
@@ -78,13 +83,21 @@ func (a *KeyAdmin) List(offset, limit int64, order string) (total int64, keys []
 }
 
 func (v *KeyView) List(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Reader)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	offset := c.QueryInt64("offset")
 	limit := c.QueryInt64("limit")
-	order := c.Query("order")
+	order := c.QueryTrim("order")
 	if order == "" {
 		order = "-created_at"
 	}
-	total, keys, err := keyAdmin.List(offset, limit, order)
+	total, keys, err := keyAdmin.List(c.Req.Context(), offset, limit, order)
 	if err != nil {
 		log.Println("Failed to list keys, %v", err)
 		c.Data["ErrorMsg"] = err.Error()
@@ -97,6 +110,7 @@ func (v *KeyView) List(c *macaron.Context, store session.Store) {
 }
 
 func (v *KeyView) Delete(c *macaron.Context, store session.Store) (err error) {
+	memberShip := GetMemberShip(c.Req.Context())
 	id := c.Params("id")
 	if id == "" {
 		code := http.StatusBadRequest
@@ -107,6 +121,13 @@ func (v *KeyView) Delete(c *macaron.Context, store session.Store) (err error) {
 	if err != nil {
 		log.Println("Invalid key id, %v", err)
 		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	permit, err := memberShip.CheckOwner(model.Writer, "keys", int64(keyID))
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
 		c.Error(code, http.StatusText(code))
 		return
 	}
@@ -124,14 +145,30 @@ func (v *KeyView) Delete(c *macaron.Context, store session.Store) (err error) {
 }
 
 func (v *KeyView) New(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	c.HTML(200, "keys_new")
 }
 
 func (v *KeyView) Create(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	redirectTo := "../keys"
-	name := c.Query("name")
-	pubkey := c.Query("pubkey")
-	_, err := keyAdmin.Create(name, pubkey)
+	name := c.QueryTrim("name")
+	pubkey := c.QueryTrim("pubkey")
+	_, err := keyAdmin.Create(c.Req.Context(), name, pubkey)
 	if err != nil {
 		log.Println("Failed to create key, %v", err)
 		c.HTML(500, "500")

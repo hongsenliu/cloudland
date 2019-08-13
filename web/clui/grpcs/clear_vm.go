@@ -36,7 +36,7 @@ func ClearVM(ctx context.Context, job *model.Job, args []string) (status string,
 	}
 	reason := ""
 	instance := &model.Instance{Model: model.Model{ID: int64(instID)}}
-	err = db.Where(instance).Take(instance).Error
+	err = db.Take(instance).Error
 	if err != nil {
 		log.Println("Invalid instance ID", err)
 		reason = err.Error()

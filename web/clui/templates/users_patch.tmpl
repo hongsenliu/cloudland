@@ -1,0 +1,34 @@
+{{template "_head" .}}
+<div class="user signup">
+	<div class="ui middle very relaxed page grid">
+        <div class="column" >
+            <form class="ui form" action="{{.Link}}" method="post" autocomplete="off">
+                <h3 class="ui top attached header">
+                    Update {{.User.Username}}
+                </h3>
+                <div class="ui attached segment">
+                    <div class="inline field">
+                        <label for="password">Password</label>
+                        <input id="password" name="password" type="password">
+                    </div>
+                    <div class="inline field">
+                        <label for="members">Organization Members</label>
+                        <select name="members" id="members" multiple="" class="ui multiple selection dropdown">
+							{{ if .User.Members }}
+							{{ range .User.Members }}
+                               <option value="{{ .OrgName }}" selected>{{.OrgName}}</option>
+							{{ end }}
+							{{ end }}
+                        </select>
+                    </div>
+                    <div class="inline field">
+                        <label></label>
+                        <button class="ui green button">Update</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+	</div>
+</div>
+{{template "_footer" .}}
+

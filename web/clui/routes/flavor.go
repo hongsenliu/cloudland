@@ -2,11 +2,13 @@
 Copyright <holder> All Rights Reserved.
 
 SPDX-License-Identifier: Apache-2.0
+
 */
 
 package routes
 
 import (
+	"log"
 	"net/http"
 	"strconv"
 
@@ -24,9 +26,15 @@ var (
 type FlavorAdmin struct{}
 type FlavorView struct{}
 
-func (a *FlavorAdmin) Create(name string, cpu, memory, disk int32) (flavor *model.Flavor, err error) {
+func (a *FlavorAdmin) Create(name string, cpu, memory, disk, swap int32) (flavor *model.Flavor, err error) {
 	db := DB()
-	flavor = &model.Flavor{Name: name, Cpu: cpu, Disk: disk, Memory: memory}
+	flavor = &model.Flavor{
+		Name:   name,
+		Cpu:    cpu,
+		Disk:   disk,
+		Memory: memory,
+		Swap:   swap,
+	}
 	err = db.Create(flavor).Error
 	return
 }
@@ -88,6 +96,14 @@ func (v *FlavorView) List(c *macaron.Context, store session.Store) {
 }
 
 func (v *FlavorView) Delete(c *macaron.Context, store session.Store) (err error) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Admin)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	id := c.Params("id")
 	if id == "" {
 		code := http.StatusBadRequest
@@ -113,10 +129,25 @@ func (v *FlavorView) Delete(c *macaron.Context, store session.Store) (err error)
 }
 
 func (v *FlavorView) New(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Admin)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	c.HTML(200, "flavors_new")
 }
 
 func (v *FlavorView) Create(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	if memberShip.UserName != "admin" {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	redirectTo := "../flavors"
 	name := c.Query("name")
 	cores := c.Query("cpu")
@@ -133,6 +164,7 @@ func (v *FlavorView) Create(c *macaron.Context, store session.Store) {
 		c.Error(code, http.StatusText(code))
 		return
 	}
+
 	dSize := c.Query("disk")
 	disk, err := strconv.Atoi(dSize)
 	if err != nil {
@@ -140,7 +172,17 @@ func (v *FlavorView) Create(c *macaron.Context, store session.Store) {
 		c.Error(code, http.StatusText(code))
 		return
 	}
-	_, err = flavorAdmin.Create(name, int32(cpu), int32(memory), int32(disk))
+	sSize := c.Query("swap")
+	swap := 0
+	if sSize != "" {
+		swap, err = strconv.Atoi(sSize)
+		if err != nil {
+			code := http.StatusBadRequest
+			c.Error(code, http.StatusText(code))
+			return
+		}
+	}
+	_, err = flavorAdmin.Create(name, int32(cpu), int32(memory), int32(disk), int32(swap))
 	if err != nil {
 		c.HTML(500, "500")
 	}

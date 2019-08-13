@@ -2,6 +2,12 @@
 Copyright <holder> All Rights Reserved.
 
 SPDX-License-Identifier: Apache-2.0
+
+History:
+   Date     Who ID    Description
+   -------- --- ---   -----------
+   01/13/19 nanjj  Initial code
+
 */
 
 package routes
@@ -10,17 +16,19 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"strconv"
 	"strings"
 
+	"github.com/IBM/cloudland/web/clui/model"
 	"github.com/go-macaron/session"
 	"github.com/spf13/viper"
 	"gopkg.in/macaron.v1"
 )
 
-func runArgs() (args []interface{}) {
+func runArgs(cfg string) (args []interface{}) {
 	host := "127.0.0.1"
-	port := "4000"
-	listen := viper.GetString("api.listen")
+	port := 80
+	listen := viper.GetString(cfg)
 	if listen != "" {
 		items := strings.Split(listen, ":")
 		if len(items) == 2 {
@@ -28,7 +36,7 @@ func runArgs() (args []interface{}) {
 				host = items[0]
 			}
 			if items[1] != "" {
-				port = items[1]
+				port, _ = strconv.Atoi(items[1])
 			}
 		}
 	}
@@ -37,7 +45,7 @@ func runArgs() (args []interface{}) {
 }
 
 func Run() (err error) {
-	New().Run(runArgs()...)
+	New().Run(runArgs("api.listen")...)
 	return
 }
 
@@ -60,14 +68,15 @@ func New() (m *macaron.Macaron) {
 	m.Get("/login", userView.LoginGet)
 	m.Post("/login", userView.LoginPost)
 	m.Get("/users", userView.List)
-	m.Get("/users/:id", userView.Show)
-	m.Post("/users/:id", userView.Update)
+	m.Get("/users/:id", userView.Edit)
+	m.Post("/users/:id", userView.Patch)
+	m.Get("/users/:id/chorg", userView.Change)
 	m.Delete("/users/:id", userView.Delete)
 	m.Get("/users/new", userView.New)
 	m.Post("/users/new", userView.Create)
 	m.Get("/orgs", orgView.List)
-	//	m.Get("/orgs/:id", orgView.Show)
-	//	m.Post("/orgs/:id", orgView.Update)
+	m.Get("/orgs/:id", orgView.Edit)
+	m.Post("/orgs/:id", orgView.Patch)
 	m.Delete("/orgs/:id", orgView.Delete)
 	m.Get("/orgs/new", orgView.New)
 	m.Post("/orgs/new", orgView.Create)
@@ -75,6 +84,10 @@ func New() (m *macaron.Macaron) {
 	m.Get("/instances/new", instanceView.New)
 	m.Post("/instances/new", instanceView.Create)
 	m.Delete("/instances/:id", instanceView.Delete)
+	m.Get("/instances/:id", instanceView.Edit)
+	m.Post("/instances/:id", instanceView.Patch)
+	m.Get("/interfaces/:id", interfaceView.Edit)
+	m.Post("/interfaces/:id", interfaceView.Patch)
 	m.Get("/flavors", flavorView.List)
 	m.Get("/flavors", flavorView.List)
 	m.Get("/flavors/new", flavorView.New)
@@ -109,10 +122,14 @@ func New() (m *macaron.Macaron) {
 	m.Get("/gateways/new", gatewayView.New)
 	m.Post("/gateways/new", gatewayView.Create)
 	m.Delete("/gateways/:id", gatewayView.Delete)
+	m.Get("/gateways/:id", gatewayView.Edit)
+	m.Post("/gateways/:id", gatewayView.Patch)
 	m.Get("/secgroups", secgroupView.List)
 	m.Get("/secgroups/new", secgroupView.New)
 	m.Post("/secgroups/new", secgroupView.Create)
 	m.Delete("/secgroups/:id", secgroupView.Delete)
+	m.Get("/secgroups/:id", secgroupView.Edit)
+	m.Post("/secgroups/:id", secgroupView.Patch)
 	m.Get("/secgroups/:sgid/secrules", secruleView.List)
 	m.Get("/secgroups/:sgid/secrules/new", secruleView.New)
 	m.Post("/secgroups/:sgid/secrules/new", secruleView.Create)
@@ -130,11 +147,21 @@ func LinkHandler(c *macaron.Context, store session.Store) {
 	log.Println(link)
 	c.Data["Link"] = link
 	if login, ok := store.Get("login").(string); ok {
+		memberShip := &MemberShip{
+			OrgID:    store.Get("oid").(int64),
+			UserID:   store.Get("uid").(int64),
+			UserName: store.Get("login").(string),
+			OrgName:  store.Get("org").(string),
+			Role:     store.Get("role").(model.Role),
+		}
+		c.Req.Request = c.Req.WithContext(memberShip.SetContext(c.Req.Context()))
 		c.Data["IsSignedIn"] = true
-		if login == "admin" {
+		if memberShip.Role == model.Admin || login == "admin" {
 			c.Data["IsAdmin"] = true
+			memberShip.Role = model.Admin
 		}
 		c.Data["Organization"] = store.Get("org").(string)
+		c.Data["Members"] = store.Get("members").([]*model.Member)
 	} else if link != "" && link != "/" && !strings.HasPrefix(link, "/login") {
 		c.Redirect("/")
 	}

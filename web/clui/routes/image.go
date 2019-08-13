@@ -2,6 +2,7 @@
 Copyright <holder> All Rights Reserved.
 
 SPDX-License-Identifier: Apache-2.0
+
 */
 
 package routes
@@ -28,8 +29,9 @@ type ImageAdmin struct{}
 type ImageView struct{}
 
 func (a *ImageAdmin) Create(ctx context.Context, name, url, format, architecture string) (image *model.Image, err error) {
+	memberShip := GetMemberShip(ctx)
 	db := DB()
-	image = &model.Image{Name: name, OSCode: name, Format: format, Status: "creating", Architecture: architecture}
+	image = &model.Image{Model: model.Model{Creater: memberShip.UserID, Owner: memberShip.OrgID}, Name: name, OSCode: name, Format: format, Status: "creating", Architecture: architecture}
 	err = db.Create(image).Error
 	if err != nil {
 		log.Println("DB create image failed, %v", err)
@@ -97,9 +99,17 @@ func (a *ImageAdmin) List(offset, limit int64, order string) (total int64, image
 }
 
 func (v *ImageView) List(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Reader)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	offset := c.QueryInt64("offset")
 	limit := c.QueryInt64("limit")
-	order := c.Query("order")
+	order := c.QueryTrim("order")
 	if order == "" {
 		order = "-created_at"
 	}
@@ -115,6 +125,7 @@ func (v *ImageView) List(c *macaron.Context, store session.Store) {
 }
 
 func (v *ImageView) Delete(c *macaron.Context, store session.Store) (err error) {
+	memberShip := GetMemberShip(c.Req.Context())
 	id := c.Params("id")
 	if id == "" {
 		code := http.StatusBadRequest
@@ -124,6 +135,13 @@ func (v *ImageView) Delete(c *macaron.Context, store session.Store) (err error) 
 	imageID, err := strconv.Atoi(id)
 	if err != nil {
 		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	permit, err := memberShip.CheckOwner(model.Writer, "images", int64(imageID))
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
 		c.Error(code, http.StatusText(code))
 		return
 	}
@@ -140,15 +158,31 @@ func (v *ImageView) Delete(c *macaron.Context, store session.Store) (err error) 
 }
 
 func (v *ImageView) New(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	c.HTML(200, "images_new")
 }
 
 func (v *ImageView) Create(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	redirectTo := "../images"
-	name := c.Query("name")
-	url := c.Query("url")
-	format := c.Query("format")
-	architecture := c.Query("architecture")
+	name := c.QueryTrim("name")
+	url := c.QueryTrim("url")
+	format := c.QueryTrim("format")
+	architecture := c.QueryTrim("architecture")
 	_, err := imageAdmin.Create(c.Req.Context(), name, url, format, architecture)
 	if err != nil {
 		c.HTML(500, "500")

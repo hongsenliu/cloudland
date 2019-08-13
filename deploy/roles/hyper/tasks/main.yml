@@ -1,16 +1,28 @@
 - name: install packages
   yum: 
-    name: ['@^Virtualization Host', 'genisoimage', 'sqlite', 'keepalived', 'jq', 'vconfig', 'git', 'NetworkManager', 'bridge-utils']
+    name: ['@^Virtualization Host', 'genisoimage', 'sqlite', 'keepalived', 'jq', 'vconfig', 'git', 'NetworkManager', 'bridge-utils', 'python-pip', 'net-tools', 'iptables-services', 'dnsmasq-utils']
     state: present
+  tags: [be_pkg]
+
+- pip:
+    name: pyparsing
   tags: [be_pkg]
 
 - name: creates cloudland directory
   file:
     path: "{{ item }}"
     state: directory
-    owner: centos
+    owner: cland
   with_items:
     - /opt/cloudland
+    - /opt/cloudland/cache
+    - /opt/cloudland/cache/image
+    - /opt/cloudland/cache/instance
+    - /opt/cloudland/cache/meta
+    - /opt/cloudland/cache/router
+    - /opt/cloudland/cache/volume
+    - /opt/cloudland/cache/dnsmasq
+    - /opt/cloudland/cache/xml
   tags: [sync]
 
 - name: synchronize cloudland and grpc
@@ -19,7 +31,7 @@
     dest: "{{ item.dest }}"
     rsync_opts: "--exclude=cache,--exclude=log,--exclude=db"
   with_items:
-    - {src: '/opt/cloudland', dest: '/opt', owner: 'centos'}
+    - {src: '/opt/cloudland', dest: '/opt', owner: 'cland'}
   tags: [sync]
 
 - name: copy sci binaries
@@ -29,6 +41,25 @@
     mode: preserve
   tags: [sci]
 
+- name: create cloudlet environment file
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: "{{ item.owner }}"
+  with_items:
+    - {src: 'cloudlet.j2', dest: '/etc/sysconfig/cloudlet', owner: 'root'}
+  tags: [be_conf] 
+ 
+- name: create cloudlet cloudrc local file
+  template:
+    src: "{{ item.src }}"
+    dest: "{{ item.dest }}"
+    owner: "{{ item.owner }}"
+  with_items:
+    - {src: 'cloudrc.local.j2', dest: '/opt/cloudland/scripts/cloudrc.local', owner: 'cland'}
+  tags: [be_conf] 
+  when: client_id == 0
+ 
 - name: copy service file
   copy: 
     src: "{{ item.src }}"
@@ -40,16 +71,6 @@
     - {src: 'recover_onboot.service', dest: '/lib/systemd/system', owner: 'root'}
   tags: [be_srv]
 
-- name: create cloudlet environment file
-  template:
-    src: "{{ item.src }}"
-    dest: "{{ item.dest }}"
-    owner: "{{ item.owner }}"
-  with_items:
-    - {src: 'cloudlet.j2', dest: '/etc/sysconfig/cloudlet', owner: 'root'}
-    - {src: 'cloudrc.local.j2', dest: '/opt/cloudland/scripts/cloudrc.local', owner: 'centos'}
-  tags: [be_srv]
- 
 - name: start cloudlet services
   systemd: 
     name: "{{ item }}"
@@ -61,5 +82,25 @@
     - 'NetworkManager'
     - 'scid'
     - 'cloudlet'
-    - 'recover_boot'
   tags: [be_srv]
+
+- name: start cloudlet services
+  systemd: 
+    name: recover_onboot
+    enabled: yes
+    daemon_reload: yes
+    state: stopped
+  tags: [be_srv]
+
+- name: mask firewalld service
+  systemd:
+    service: firewalld
+    masked: yes
+    state: stopped
+  tags: [firewall]
+  ignore_errors: yes
+
+- name: Allow cland necessary ports
+  script: firewall.sh
+  tags: [firewall]
+  ignore_errors: yes

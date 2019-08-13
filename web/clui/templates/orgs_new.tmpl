@@ -11,13 +11,15 @@
                         <label for="orgname">Organization Name</label>
                         <input id="orgname" name="orgname" autofocus required>
                     </div>
-                    <div class="required inline field">
+		{{ if $.IsAdmin }}
+                    <div class="inline field">
                         <label for="owner">Owner</label>
-                        <input id="owner"  name="owner" type="owner" autocomplete="off" required>
+                        <input id="owner"  name="owner" autocomplete="off">
                     </div>
+                {{ end }}
                     <div class="inline field">
                         <label></label>
-                        <button class="ui green button">Create New User</button>
+                        <button class="ui green button">Create New Organization</button>
                     </div>
                 </div>
             </form>

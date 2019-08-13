@@ -2,17 +2,26 @@
 Copyright <holder> All Rights Reserved.
 
 SPDX-License-Identifier: Apache-2.0
+
+History:
+   Date     Who ID    Description
+   -------- --- ---   -----------
+   01/13/19 nanjj  Initial code
+
 */
 
 package routes
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/IBM/cloudland/web/clui/model"
+	"github.com/IBM/cloudland/web/sca/dbs"
 	"github.com/go-macaron/session"
 	macaron "gopkg.in/macaron.v1"
 )
@@ -27,24 +36,131 @@ type OrgAdmin struct {
 
 type OrgView struct{}
 
-func (a *OrgAdmin) Create(name, owner string) (org *model.Organization, err error) {
+func (a *OrgAdmin) Create(ctx context.Context, name, owner string) (org *model.Organization, err error) {
+	memberShip := GetMemberShip(ctx)
 	db := DB()
 	user := &model.User{Username: owner}
-	err = db.Model(user).Take(user).Error
+	err = db.Where(user).Take(user).Error
+	if err != nil {
+		log.Println("Failed to query user", err)
+		return
+	}
 	org = &model.Organization{
+		Model: model.Model{Owner: user.ID, Creater: memberShip.UserID},
 		Name:  name,
-		Owner: user.ID,
 	}
 	err = db.Create(org).Error
 	if err != nil {
-		log.Println("DB failed to create organization, %v", err)
+		log.Println("DB failed to create organization ", err)
 		return
+	}
+	secGroup, err := secgroupAdmin.Create(ctx, name, true, org.ID)
+	if err != nil {
+		log.Println("Failed to create security group", err)
 	}
 	member := &model.Member{UserID: user.ID, UserName: owner, OrgID: org.ID, OrgName: name, Role: model.Owner}
 	err = db.Create(member).Error
 	if err != nil {
-		log.Println("DB failed to create organization member, %v", err)
+		log.Println("DB failed to create organization member ", err)
 		return
+	}
+	user.Owner = org.ID
+	err = db.Save(user).Error
+	if err != nil {
+		log.Println("DB failed to update user owner", err)
+		return
+	}
+	org.DefaultSG = secGroup.ID
+	err = db.Save(org).Error
+	if err != nil {
+		log.Println("DB failed to update orgabization default security group", err)
+		return
+	}
+	subnet, err := subnetAdmin.Create(ctx, name, "", "192.168.127.0", "255.255.255.0", "", "", "", "", "", org.ID)
+	if err != nil {
+		log.Println("Failed to create demo subnet", err)
+	} else {
+		subIDs := []int64{subnet.ID}
+		_, _ = gatewayAdmin.Create(ctx, name, 0, 0, subIDs, org.ID)
+	}
+	return
+}
+
+func (a *OrgAdmin) Update(ctx context.Context, orgID int64, members, users []string, roles []model.Role) (org *model.Organization, err error) {
+	memberShip := GetMemberShip(ctx)
+	db := DB()
+	org = &model.Organization{Model: model.Model{ID: orgID}}
+	err = db.Set("gorm:auto_preload", true).Take(org).Take(org).Error
+	if err != nil {
+		log.Println("Failed to query organization", err)
+		return
+	}
+	for _, name := range members {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			continue
+		}
+		found := false
+		for _, em := range org.Members {
+			if name == em.UserName {
+				found = true
+				break
+			}
+		}
+		if found == true {
+			continue
+		}
+		user := &model.User{Username: name}
+		err = db.Model(user).Where(user).Take(user).Error
+		if err != nil || user.ID <= 0 {
+			log.Println("Failed to query user", err)
+			continue
+		}
+		member := &model.Member{
+			Model:    model.Model{Creater: memberShip.UserID, Owner: orgID},
+			UserName: name,
+			UserID:   user.ID,
+			OrgName:  org.Name,
+			OrgID:    orgID,
+			Role:     model.Reader,
+		}
+		err = db.Create(member).Error
+		if err != nil {
+			log.Println("Failed to create member", err)
+			continue
+		}
+	}
+	for _, em := range org.Members {
+		found := false
+		for _, name := range members {
+			name = strings.TrimSpace(name)
+			if name == "" {
+				continue
+			}
+			if name == em.UserName {
+				found = true
+				break
+			}
+		}
+		if found == true {
+			continue
+		}
+		member := &model.Member{
+			UserName: em.UserName,
+			OrgID:    orgID,
+		}
+		err = db.Where(member).Delete(member).Error
+		if err != nil {
+			log.Println("Failed to delete member", err)
+			continue
+		}
+	}
+	for i, user := range users {
+		err = db.Model(&model.Member{}).Where("user_name = ? and org_id = ?", user, orgID).Update("role", roles[i]).Error
+		if err != nil {
+			log.Println("Failed to update member", err)
+			continue
+		}
 	}
 	return
 }
@@ -56,7 +172,7 @@ func (a *OrgAdmin) Get(name string) (org *model.Organization, err error) {
 	return
 }
 
-func (a *OrgAdmin) Delete(id int64) (err error) {
+func (a *OrgAdmin) Delete(ctx context.Context, id int64) (err error) {
 	db := DB()
 	db = db.Begin()
 	defer func() {
@@ -67,10 +183,34 @@ func (a *OrgAdmin) Delete(id int64) (err error) {
 		}
 	}()
 
+	count := 0
+	err = db.Model(&model.Interface{}).Where("owner = ?", id).Count(&count).Error
+	if err != nil {
+		log.Println("DB failed to query interfaces, %v", err)
+		return
+	}
+	if count > 0 {
+		log.Println("There are resources in this org", err)
+		err = fmt.Errorf("There are resources in this org")
+		return
+	}
 	err = db.Delete(&model.Member{}, `org_id = ?`, id).Error
 	if err != nil {
 		log.Println("DB failed to delete member, %v", err)
 		return
+	}
+	secgroups := []*model.SecurityGroup{}
+	err = db.Where("owner = ?", id).Find(&secgroups).Error
+	if err != nil {
+		log.Println("DB failed to query security groups", err)
+		return
+	}
+	for _, sg := range secgroups {
+		err = secgroupAdmin.Delete(sg.ID)
+		if err != nil {
+			log.Println("Can not delete security group", err)
+			return
+		}
 	}
 	err = db.Delete(&model.Organization{Model: model.Model{ID: id}}).Error
 	if err != nil {
@@ -80,28 +220,30 @@ func (a *OrgAdmin) Delete(id int64) (err error) {
 	return
 }
 
-func (a *OrgAdmin) List(owner string) (orgs []*model.Organization, err error) {
+func (a *OrgAdmin) List(ctx context.Context, offset, limit int64, order string) (total int64, orgs []*model.Organization, err error) {
+	memberShip := GetMemberShip(ctx)
+	if limit == 0 {
+		limit = 20
+	}
+
+	if order == "" {
+		order = "created_at"
+	}
+
 	db := DB()
-	user := &model.User{Username: owner}
-	err = db.Model(user).Take(user).Error
+	user := &model.User{Model: model.Model{ID: memberShip.UserID}}
+	err = db.Take(user).Error
 	if err != nil {
 		log.Println("DB failed to query user, %v", err)
 		return
 	}
-	members := []*model.Member{}
-	err = db.Find(&members, &model.Member{UserID: user.ID}).Error
-	if err != nil {
-		log.Println("DB failed to query members, %v", err)
-		return
-	}
-	orgs = []*model.Organization{}
+	db = dbs.Sortby(db.Offset(offset).Limit(limit), order)
 	where := ""
-	for i, member := range members {
-		if i == 0 {
-			where = fmt.Sprintf("id = %d", member.OrgID)
-		} else {
-			where = fmt.Sprintf("%s or id = %d", where, member.OrgID)
-		}
+	if memberShip.Role != model.Admin {
+		where = fmt.Sprintf("owner = %d", user.ID)
+	}
+	if err = db.Model(&model.Organization{}).Where(where).Count(&total).Error; err != nil {
+		return
 	}
 	err = db.Where(where).Find(&orgs).Error
 	if err != nil {
@@ -112,11 +254,10 @@ func (a *OrgAdmin) List(owner string) (orgs []*model.Organization, err error) {
 }
 
 func (v *OrgView) List(c *macaron.Context, store session.Store) {
-	order := c.Query("order")
-	if order == "" {
-		order = "-created_at"
-	}
-	orgs, err := orgAdmin.List(order)
+	offset := c.QueryInt64("offset")
+	limit := c.QueryInt64("limit")
+	order := c.QueryTrim("order")
+	total, orgs, err := orgAdmin.List(c.Req.Context(), offset, limit, order)
 	if err != nil {
 		log.Println("Failed to list organizations, %v", err)
 		c.Data["ErrorMsg"] = err.Error()
@@ -124,10 +265,19 @@ func (v *OrgView) List(c *macaron.Context, store session.Store) {
 		return
 	}
 	c.Data["Organizations"] = orgs
+	c.Data["Total"] = total
 	c.HTML(200, "orgs")
 }
 
 func (v *OrgView) Delete(c *macaron.Context, store session.Store) (err error) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Admin)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	id := c.Params("id")
 	if id == "" {
 		log.Println("ID is empty, %v", err)
@@ -142,7 +292,7 @@ func (v *OrgView) Delete(c *macaron.Context, store session.Store) (err error) {
 		c.Error(code, http.StatusText(code))
 		return
 	}
-	err = orgAdmin.Delete(int64(orgID))
+	err = orgAdmin.Delete(c.Req.Context(), int64(orgID))
 	if err != nil {
 		log.Println("Failed to delete organization, %v", err)
 		code := http.StatusInternalServerError
@@ -156,14 +306,115 @@ func (v *OrgView) Delete(c *macaron.Context, store session.Store) (err error) {
 }
 
 func (v *OrgView) New(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Admin)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	c.HTML(200, "orgs_new")
 }
 
+func (v *OrgView) Edit(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	db := DB()
+	id := c.Params("id")
+	if id == "" {
+		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	orgID, err := strconv.Atoi(id)
+	if err != nil {
+		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	if memberShip.Role != model.Admin && (memberShip.Role < model.Owner || memberShip.OrgID != int64(orgID)) {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	org := &model.Organization{Model: model.Model{ID: int64(orgID)}}
+	if err = db.Preload("Members").Take(org).Error; err != nil {
+		log.Println("Organization query failed", err)
+		return
+	}
+	org.OwnerUser = &model.User{Model: model.Model{ID: org.Owner}}
+	if err = db.Take(org.OwnerUser).Error; err != nil {
+		log.Println("Owner user query failed", err)
+		return
+	}
+	c.Data["Org"] = org
+	c.HTML(200, "orgs_patch")
+}
+
+func (v *OrgView) Patch(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	id := c.Params("id")
+	if id == "" {
+		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	orgID, err := strconv.Atoi(id)
+	if err != nil {
+		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	if memberShip.Role != model.Admin && (memberShip.Role < model.Owner || memberShip.OrgID != int64(orgID)) {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	redirectTo := "../orgs/" + id
+	members := c.QueryTrim("members")
+	memberList := strings.Split(members, " ")
+	userList := c.QueryStrings("names")
+	roles := c.QueryStrings("roles")
+	var roleList []model.Role
+	for _, r := range roles {
+		role, err := strconv.Atoi(r)
+		if err != nil {
+			log.Println("Failed to convert role", err)
+			code := http.StatusBadRequest
+			c.Error(code, http.StatusText(code))
+			return
+		}
+		if memberShip.Role < model.Role(role) {
+			log.Println("Not authorized for this operation")
+			code := http.StatusUnauthorized
+			c.Error(code, http.StatusText(code))
+			return
+		}
+		roleList = append(roleList, model.Role(role))
+	}
+	_, err = orgAdmin.Update(c.Req.Context(), int64(orgID), memberList, userList, roleList)
+	if err != nil {
+		log.Println("Failed to create organization, %v", err)
+		c.HTML(500, "500")
+	}
+	c.Redirect(redirectTo)
+}
+
 func (v *OrgView) Create(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Admin)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	redirectTo := "../orgs"
-	name := c.Query("name")
-	owner := c.Query("owner")
-	_, err := orgAdmin.Create(name, owner)
+	name := c.QueryTrim("name")
+	owner := c.QueryTrim("owner")
+	_, err := orgAdmin.Create(c.Req.Context(), name, owner)
 	if err != nil {
 		log.Println("Failed to create organization, %v", err)
 		c.HTML(500, "500")

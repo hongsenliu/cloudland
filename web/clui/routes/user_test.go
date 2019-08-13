@@ -2,11 +2,18 @@
 Copyright <holder> All Rights Reserved.
 
 SPDX-License-Identifier: Apache-2.0
+
+History:
+   Date     Who ID    Description
+   -------- --- ---   -----------
+   01/13/19 nanjj  Initial code
+
 */
 
 package routes
 
 import (
+	"strconv"
 	"testing"
 
 	"github.com/IBM/cloudland/web/clui/model"
@@ -62,11 +69,11 @@ func TestUserAdminAccessToken(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = orgAdmin.Create("admin", user.ID)
+	_, err = orgAdmin.Create("admin", strconv.FormatInt(user.ID, 10))
 	if err != nil {
 		t.Fatal(err)
 	}
-	oid, role, accessToken, err := userAdmin.AccessToken(user.ID, "admin", "admin")
+	oid, role, accessToken, _, _, err := userAdmin.AccessToken(user.ID, "admin", "admin")
 	if err != nil || oid == 0 || role == model.None {
 		t.Fatal(err, oid, role)
 	}

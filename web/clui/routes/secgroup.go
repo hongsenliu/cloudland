@@ -7,6 +7,7 @@ SPDX-License-Identifier: Apache-2.0
 package routes
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net/http"
@@ -26,30 +27,90 @@ var (
 type SecgroupAdmin struct{}
 type SecgroupView struct{}
 
-func (a *SecgroupAdmin) Create(name string, isDefault bool) (secgroup *model.SecurityGroup, err error) {
+func (a *SecgroupAdmin) Switch(ctx context.Context, newSg *model.SecurityGroup, store session.Store) (err error) {
+	memberShip := GetMemberShip(ctx)
 	db := DB()
-	secgroup = &model.SecurityGroup{Name: name, IsDefault: isDefault}
+	org := &model.Organization{Model: model.Model{ID: memberShip.OrgID}}
+	err = db.Take(org).Error
+	if err != nil {
+		log.Println("Failed to query organization", err)
+	}
+	oldSg := &model.SecurityGroup{Model: model.Model{ID: org.DefaultSG}}
+	err = db.Take(oldSg).Error
+	if err != nil {
+		log.Println("Failed to query default security group", err)
+	}
+	oldSg.IsDefault = false
+	err = db.Save(oldSg).Error
+	if err != nil {
+		log.Println("Failed to save old security group", err)
+	}
+	org.DefaultSG = newSg.ID
+	err = db.Save(org).Error
+	if err != nil {
+		log.Println("Failed to save organization", err)
+	}
+	newSg.IsDefault = true
+	err = db.Save(newSg).Error
+	if err != nil {
+		log.Println("Failed to save new security group", err)
+	}
+	store.Set("defsg", org.DefaultSG)
+	return
+}
+
+func (a *SecgroupAdmin) Update(ctx context.Context, sgID int64, name string, isDefault bool) (secgroup *model.SecurityGroup, err error) {
+	db := DB()
+	secgroup = &model.SecurityGroup{Model: model.Model{ID: sgID}}
+	err = db.Take(secgroup).Error
+	if err != nil {
+		log.Println("Failed to query security group", err)
+		return
+	}
+	if name != "" && secgroup.Name != name {
+		secgroup.Name = name
+	}
+	if isDefault && secgroup.IsDefault != isDefault {
+		secgroup.IsDefault = isDefault
+	}
+	err = db.Save(secgroup).Error
+	if err != nil {
+		log.Println("Failed to save security group", err)
+		return
+	}
+	return
+}
+
+func (a *SecgroupAdmin) Create(ctx context.Context, name string, isDefault bool, owner int64) (secgroup *model.SecurityGroup, err error) {
+	memberShip := GetMemberShip(ctx)
+	db := DB()
+	secgroup = &model.SecurityGroup{Model: model.Model{Creater: memberShip.UserID, Owner: owner}, Name: name, IsDefault: isDefault}
 	err = db.Create(secgroup).Error
 	if err != nil {
 		log.Println("DB failed to create security group, %v", err)
 		return
 	}
-	_, err = secruleAdmin.Create(secgroup.ID, "0.0.0.0/0", "egress", "tcp", 1, 65535)
+	_, err = secruleAdmin.Create(ctx, secgroup.ID, owner, "0.0.0.0/0", "egress", "tcp", 1, 65535)
 	if err != nil {
 		log.Println("Failed to create security rule", err)
 		return
 	}
-	_, err = secruleAdmin.Create(secgroup.ID, "0.0.0.0/0", "ingress", "tcp", 22, 22)
+	_, err = secruleAdmin.Create(ctx, secgroup.ID, owner, "0.0.0.0/0", "egress", "udp", 1, 65535)
 	if err != nil {
 		log.Println("Failed to create security rule", err)
 		return
 	}
-	_, err = secruleAdmin.Create(secgroup.ID, "0.0.0.0/0", "egress", "icmp", -1, -1)
+	_, err = secruleAdmin.Create(ctx, secgroup.ID, owner, "0.0.0.0/0", "ingress", "tcp", 22, 22)
 	if err != nil {
 		log.Println("Failed to create security rule", err)
 		return
 	}
-	_, err = secruleAdmin.Create(secgroup.ID, "0.0.0.0/0", "ingress", "icmp", -1, -1)
+	_, err = secruleAdmin.Create(ctx, secgroup.ID, owner, "0.0.0.0/0", "egress", "icmp", -1, -1)
+	if err != nil {
+		log.Println("Failed to create security rule", err)
+		return
+	}
+	_, err = secruleAdmin.Create(ctx, secgroup.ID, owner, "0.0.0.0/0", "ingress", "icmp", -1, -1)
 	if err != nil {
 		log.Println("Failed to create security rule", err)
 		return
@@ -67,25 +128,30 @@ func (a *SecgroupAdmin) Delete(id int64) (err error) {
 			db.Rollback()
 		}
 	}()
-	count := 0
-	err = db.Model(&model.SecurityRule{}).Where("secgroup = ?", id).Count(&count).Error
+	secgroup := &model.SecurityGroup{Model: model.Model{ID: id}}
+	err = db.Model(secgroup).Related(&secgroup.Interfaces, "Interfaces").Error
 	if err != nil {
-		log.Println("DB failed to delete security rules, %v", err)
+		log.Println("DB failed to query security group", err)
 		return
 	}
-	if count > 0 {
-		log.Println("Security group has rules")
-		err = fmt.Errorf("Security group has rules")
+	if len(secgroup.Interfaces) > 0 {
+		log.Println("Security group has associated interfaces")
+		err = fmt.Errorf("Security group has associated interfaces")
 		return
+	}
+	err = db.Where("secgroup = ?", id).Delete(&model.SecurityRule{}).Error
+	if err != nil {
+		log.Println("DB failed to delete security group rules", err)
 	}
 	if err = db.Delete(&model.SecurityGroup{Model: model.Model{ID: id}}).Error; err != nil {
-		log.Println("DB failed to delete security group, %v", err)
+		log.Println("DB failed to delete security group", err)
 		return
 	}
 	return
 }
 
-func (a *SecgroupAdmin) List(offset, limit int64, order string) (total int64, secgroups []*model.SecurityGroup, err error) {
+func (a *SecgroupAdmin) List(ctx context.Context, offset, limit int64, order string) (total int64, secgroups []*model.SecurityGroup, err error) {
+	memberShip := GetMemberShip(ctx)
 	db := DB()
 	if limit == 0 {
 		limit = 20
@@ -95,13 +161,14 @@ func (a *SecgroupAdmin) List(offset, limit int64, order string) (total int64, se
 		order = "created_at"
 	}
 
+	where := memberShip.GetWhere()
 	secgroups = []*model.SecurityGroup{}
-	if err = db.Model(&model.SecurityGroup{}).Count(&total).Error; err != nil {
+	if err = db.Model(&model.SecurityGroup{}).Where(where).Count(&total).Error; err != nil {
 		log.Println("DB failed to count security group(s), %v", err)
 		return
 	}
 	db = dbs.Sortby(db.Offset(offset).Limit(limit), order)
-	if err = db.Find(&secgroups).Error; err != nil {
+	if err = db.Where(where).Find(&secgroups).Error; err != nil {
 		log.Println("DB failed to query security group(s), %v", err)
 		return
 	}
@@ -110,13 +177,21 @@ func (a *SecgroupAdmin) List(offset, limit int64, order string) (total int64, se
 }
 
 func (v *SecgroupView) List(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Reader)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	offset := c.QueryInt64("offset")
 	limit := c.QueryInt64("limit")
-	order := c.Query("order")
+	order := c.QueryTrim("order")
 	if order == "" {
 		order = "-created_at"
 	}
-	total, secgroups, err := secgroupAdmin.List(offset, limit, order)
+	total, secgroups, err := secgroupAdmin.List(c.Req.Context(), offset, limit, order)
 	if err != nil {
 		log.Println("Failed to list security group(s), %v", err)
 		c.Data["ErrorMsg"] = err.Error()
@@ -129,6 +204,7 @@ func (v *SecgroupView) List(c *macaron.Context, store session.Store) {
 }
 
 func (v *SecgroupView) Delete(c *macaron.Context, store session.Store) (err error) {
+	memberShip := GetMemberShip(c.Req.Context())
 	id := c.Params("id")
 	if id == "" {
 		code := http.StatusBadRequest
@@ -139,6 +215,13 @@ func (v *SecgroupView) Delete(c *macaron.Context, store session.Store) (err erro
 	if err != nil {
 		log.Println("Invalid security group ID, %v", err)
 		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	permit, err := memberShip.CheckOwner(model.Writer, "security_groups", int64(secgroupID))
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
 		c.Error(code, http.StatusText(code))
 		return
 	}
@@ -156,28 +239,122 @@ func (v *SecgroupView) Delete(c *macaron.Context, store session.Store) (err erro
 }
 
 func (v *SecgroupView) New(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
 	c.HTML(200, "secgroups_new")
 }
 
-func (v *SecgroupView) Create(c *macaron.Context, store session.Store) {
-	redirectTo := "../secgroups"
-	name := c.Query("name")
-	isdefStr := c.Query("isdefault")
-	if isdefStr == "" {
-		isdefStr = "false"
-	}
-	isDef, err := strconv.ParseBool(isdefStr)
+func (v *SecgroupView) Edit(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	db := DB()
+	id := c.Params(":id")
+	sgID, err := strconv.Atoi(id)
 	if err != nil {
-		log.Println("Invalid default value, %v", err)
 		code := http.StatusBadRequest
 		c.Error(code, http.StatusText(code))
 		return
 	}
+	permit, err := memberShip.CheckOwner(model.Writer, "security_groups", int64(sgID))
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	secgroup := &model.SecurityGroup{Model: model.Model{ID: int64(sgID)}}
+	err = db.Take(secgroup).Error
+	if err != nil {
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(500, err.Error())
+		return
+	}
+	c.Data["Secgroup"] = secgroup
+	c.HTML(200, "secgroups_patch")
+}
 
-	_, err = secgroupAdmin.Create(name, isDef)
+func (v *SecgroupView) Patch(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	redirectTo := "../secgroups"
+	id := c.Params(":id")
+	name := c.QueryTrim("name")
+	sgID, err := strconv.Atoi(id)
+	if err != nil {
+		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	permit, err := memberShip.CheckOwner(model.Writer, "security_groups", int64(sgID))
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	isdefStr := c.QueryTrim("isdefault")
+	isDef := false
+	if isdefStr == "" || isdefStr == "no" {
+		isDef = false
+	} else if isdefStr == "yes" {
+		isDef = true
+	}
+	secgroup, err := secgroupAdmin.Update(c.Req.Context(), int64(sgID), name, isDef)
+	if err != nil {
+		c.HTML(500, err.Error())
+	}
+	if isDef {
+		log.Println("$$$$$$$$$ To switch default group")
+		err = secgroupAdmin.Switch(c.Req.Context(), secgroup, store)
+		if err != nil {
+			log.Println("Failed to switch security group", err)
+			c.Data["ErrorMsg"] = err.Error()
+			c.HTML(500, "500")
+			return
+		}
+	}
+	c.Redirect(redirectTo)
+	return
+}
+
+func (v *SecgroupView) Create(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	redirectTo := "../secgroups"
+	name := c.QueryTrim("name")
+	isdefStr := c.QueryTrim("isdefault")
+	isDef := false
+	if isdefStr == "" || isdefStr == "no" {
+		isDef = false
+	} else if isdefStr == "yes" {
+		isDef = true
+	}
+
+	secgroup, err := secgroupAdmin.Create(c.Req.Context(), name, isDef, memberShip.OrgID)
 	if err != nil {
 		log.Println("Failed to create security group, %v", err)
+		c.Data["ErrorMsg"] = err.Error()
 		c.HTML(500, "500")
+		return
+	}
+	if isDef {
+		err = secgroupAdmin.Switch(c.Req.Context(), secgroup, store)
+		if err != nil {
+			log.Println("Failed to switch security group", err)
+			c.Data["ErrorMsg"] = err.Error()
+			c.HTML(500, "500")
+			return
+		}
 	}
 	c.Redirect(redirectTo)
 }

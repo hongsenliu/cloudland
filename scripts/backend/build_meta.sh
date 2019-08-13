@@ -31,7 +31,7 @@ random_seed=`cat /dev/urandom | head -c 512 | base64 -w 0`
             echo -n '"key'$i'": "'$key'\n"'
             let i=$i+1
         done
-        echo -n '},'
+        echo '},'
     fi
     echo '  "launch_index": 0,'
     echo '  "hostname": "'${vm_name}.${cloud_domain}'",'
@@ -42,7 +42,7 @@ random_seed=`cat /dev/urandom | head -c 512 | base64 -w 0`
     echo '}'
 ) > $latest_dir/meta_data.json
 
-net_json=$(jq 'del(.userdata) | del(.vlans) | del(.keys)' <<< $vm_meta | jq --arg dns $dns_server '.services[0].type = "dns" | .services[0].address |= .+$dns')
+net_json=$(jq 'del(.userdata) | del(.vlans) | del(.keys) | del(.security)' <<< $vm_meta | jq --arg dns $dns_server '.services[0].type = "dns" | .services[0].address |= .+$dns')
 echo "$net_json" > $latest_dir/network_data.json
 
 mkisofs -quiet -R -V config-2 -o ${cache_dir}/meta/${vm_ID}.iso $working_dir &> /dev/null

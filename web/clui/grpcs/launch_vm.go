@@ -21,7 +21,7 @@ func init() {
 }
 
 func LaunchVM(ctx context.Context, job *model.Job, args []string) (status string, err error) {
-	//|:-COMMAND-:| launch_vm.sh '127' 'running' '3'
+	//|:-COMMAND-:| launch_vm.sh '127' 'running' '3' 'reason'
 	db := dbs.DB()
 	argn := len(args)
 	if argn < 4 {
@@ -51,14 +51,20 @@ func LaunchVM(ctx context.Context, job *model.Job, args []string) (status string
 			reason = err.Error()
 			return
 		}
-	} else {
-		reason = "Instance not launched for unknown reason"
+	} else if argn >= 4 {
+		reason = args[4]
 	}
 	err = db.Model(&instance).Updates(map[string]interface{}{
 		"status": serverStatus,
 		"hyper":  int32(hyperID),
 		"reason": reason}).Error
 	if err != nil {
+		log.Println("Failed to update instance", err)
+		return
+	}
+	err = db.Model(&model.Interface{}).Where("instance = ?", instance.ID).Update(map[string]interface{}{"hyper": int32(hyperID)}).Error
+	if err != nil {
+		log.Println("Failed to update interface", err)
 		return
 	}
 	return

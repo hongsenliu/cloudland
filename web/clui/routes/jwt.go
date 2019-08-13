@@ -2,6 +2,12 @@
 Copyright <holder> All Rights Reserved.
 
 SPDX-License-Identifier: Apache-2.0
+
+History:
+   Date     Who ID    Description
+   -------- --- ---   -----------
+   01/13/19 nanjj  Initial code
+
 */
 
 package routes
@@ -25,18 +31,24 @@ var (
 
 type HypercubeClaims struct {
 	jwt.StandardClaims
-	UID  int64      `json:"uid,omitempty"`
-	OID  int64      `json:"oid,omitempty"`
+	UID  string     `json:"uid,omitempty"`
+	OID  string     `json:"oid,omitempty"`
 	Role model.Role `json:"r,omitempty"`
 }
 
-func NewClaims(u, o string, uid, oid int64, role model.Role) (claims jwt.Claims) {
+func (*HypercubeClaims) verifyPrivilege(resource interface{}) (result bool) {
+	// TODO:  checkout authority
+	return true
+}
+
+func NewClaims(u, o, uid, oid string, role model.Role) (claims jwt.Claims, issuedAt, ExpiresAt int64) {
 	now := time.Now()
-	issuedAt := now.Unix()
-	return &HypercubeClaims{
+	issuedAt = now.Unix()
+	ExpiresAt = now.Add(time.Hour * 2).Unix()
+	claims = &HypercubeClaims{
 		StandardClaims: jwt.StandardClaims{
 			Audience:  u,
-			ExpiresAt: now.Add(time.Hour * 2).Unix(),
+			ExpiresAt: ExpiresAt,
 			Id:        claimsID(now),
 			IssuedAt:  issuedAt,
 			Issuer:    "Cloudland",
@@ -47,6 +59,8 @@ func NewClaims(u, o string, uid, oid int64, role model.Role) (claims jwt.Claims)
 		OID:  oid,
 		Role: role,
 	}
+
+	return
 }
 
 func claimsID(now time.Time) string {
@@ -88,9 +102,22 @@ func privateKey() *rsa.PrivateKey {
 	return _privateKey
 }
 
-func NewToken(u, o string, uid, oid int64, role model.Role) (signed string, err error) {
-	claims := NewClaims(u, o, uid, oid, role)
+func NewToken(u, o, uid, oid string, role model.Role) (signed string, issueAt, expiresAt int64, err error) {
+	var claims jwt.Claims
+	claims, issueAt, expiresAt = NewClaims(u, o, uid, oid, role)
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	signed, err = token.SignedString(privateKey())
+	return
+}
+
+func ParseToken(tokenString string) (tokenClaims *HypercubeClaims, err error) {
+	tokenClaims = &HypercubeClaims{}
+	_, err = jwt.ParseWithClaims(
+		tokenString,
+		tokenClaims,
+		func(token *jwt.Token) (interface{}, error) {
+			return publicKey(), nil
+		},
+	)
 	return
 }
