@@ -81,6 +81,80 @@ func checkIfExistVni(vni int64) (result bool, err error) {
 	}
 }
 
+func (a *SubnetAdmin) Update(ctx context.Context, id int64, name, gateway, start, end, routes string) (subnet *model.Subnet, err error) {
+	db := DB()
+	subnet = &model.Subnet{Model: model.Model{ID: id}}
+	err = db.Take(subnet).Error
+	if err != nil {
+		log.Println("DB failed to query subnet ", err)
+		return
+	}
+	if name != "" {
+		subnet.Name = name
+	}
+	if gateway != "" {
+		preSize, _ := net.IPMask(net.ParseIP(subnet.Netmask).To4()).Size()
+		subnet.Gateway = fmt.Sprintf("%s/%d", gateway, preSize)
+	}
+	if start != "" {
+		subnet.Start = start
+	}
+	if end != "" {
+		subnet.End = end
+	}
+	subnet.Routes = routes
+	err = db.Save(subnet).Error
+	if err != nil {
+		log.Println("DB failed to save subnet ", err)
+		return
+	}
+	if subnet.Router > 0 {
+		err = setRouting(ctx, subnet.ID, subnet, false)
+		if err != nil {
+			log.Println("Failed to set routing for subnet")
+			return
+		}
+	} else if subnet.Type != "internal" {
+		var ifaces []*model.Interface
+		ifType := fmt.Sprintf("gateway_%s", subnet.Type)
+		err = db.Where("type = ? and subnet = ?", ifType, subnet.ID).Find(&ifaces).Error
+		if err != nil {
+			log.Println("DB failed to query interfaces")
+			return
+		}
+		for _, iface := range ifaces {
+			err = setRouting(ctx, iface.Device, subnet, true)
+			if err != nil {
+				log.Println("Failed to set routing for subnet")
+			}
+		}
+	}
+	return
+}
+
+func setRouting(ctx context.Context, gatewayID int64, subnet *model.Subnet, routeOnly bool) (err error) {
+	db := DB()
+	gateway := &model.Gateway{Model: model.Model{ID: gatewayID}}
+	err = db.Take(gateway).Error
+	if err != nil {
+		log.Println("DB failed to query router", err)
+		return
+	}
+	control := fmt.Sprintf("toall=router-%d:%d,%d", gateway.ID, gateway.Hyper, gateway.Peer)
+	if routeOnly {
+		command := fmt.Sprintf("/opt/cloudland/scripts/backend/set_route.sh %d %d %s<<EOF\n%s\nEOF", gateway.ID, subnet.Vlan, subnet.Type, subnet.Routes)
+		err = hyperExecute(ctx, control, command)
+	} else {
+		command := fmt.Sprintf("/opt/cloudland/scripts/backend/set_gw_route.sh %d %s %d soft <<EOF\n%s\nEOF", gateway.ID, subnet.Gateway, subnet.Vlan, subnet.Routes)
+		err = hyperExecute(ctx, control, command)
+	}
+	if err != nil {
+		log.Println("Set gateway failed")
+		return
+	}
+	return
+}
+
 func (a *SubnetAdmin) Create(ctx context.Context, name, vlan, network, netmask, gateway, start, end, rtype string, routes string, owner int64) (subnet *model.Subnet, err error) {
 	memberShip := GetMemberShip(ctx)
 	if owner == 0 {
@@ -98,7 +172,7 @@ func (a *SubnetAdmin) Create(ctx context.Context, name, vlan, network, netmask, 
 		return
 	}
 	count := 0
-	err = db.Model(&model.Subnet{}).Where("vlan = ?", vlanNo).Count(&count).Error
+	err = db.Model(&model.Network{}).Where("vlan = ?", vlanNo).Count(&count).Error
 	if err != nil {
 		log.Println("Database failed to count network", err)
 		return
@@ -172,7 +246,7 @@ func (a *SubnetAdmin) Create(ctx context.Context, name, vlan, network, netmask, 
 			ip = cidr.Inc(ip)
 		}
 	}
-	netlink := &model.Network{Vlan: int64(vlanNo), Type: "vxlan"}
+	netlink := &model.Network{Vlan: int64(vlanNo)}
 	if vlanNo < 4096 {
 		netlink.Type = "vlan"
 	}
@@ -198,7 +272,7 @@ func (a *SubnetAdmin) Create(ctx context.Context, name, vlan, network, netmask, 
 func execNetwork(ctx context.Context, netlink *model.Network, subnet *model.Subnet, owner int64) (err error) {
 	if netlink.Hyper < 0 {
 		var dhcp1 *model.Interface
-		dhcp1, err = CreateInterface(ctx, subnet.ID, netlink.ID, owner, "", "dhcp-1", "dhcp", nil)
+		dhcp1, err = CreateInterface(ctx, subnet.ID, netlink.ID, owner, "", "", "dhcp-1", "dhcp", nil)
 		if err != nil {
 			log.Println("Failed to allocate dhcp first address", err)
 			return
@@ -213,7 +287,7 @@ func execNetwork(ctx context.Context, netlink *model.Network, subnet *model.Subn
 	}
 	if netlink.Peer < 0 {
 		var dhcp2 *model.Interface
-		dhcp2, err = CreateInterface(ctx, subnet.ID, netlink.ID, owner, "", "dhcp-2", "dhcp", nil)
+		dhcp2, err = CreateInterface(ctx, subnet.ID, netlink.ID, owner, "", "", "dhcp-2", "dhcp", nil)
 		if err != nil {
 			log.Println("Failed to allocate dhcp first address", err)
 			return
@@ -338,6 +412,16 @@ func (a *SubnetAdmin) List(ctx context.Context, offset, limit int64, order strin
 	if err = db.Preload("Netlink").Where(where).Find(&subnets).Error; err != nil {
 		return
 	}
+	permit := memberShip.CheckPermission(model.Admin)
+	if permit {
+		for _, subnet := range subnets {
+			subnet.OwnerInfo = &model.Organization{Model: model.Model{ID: subnet.Owner}}
+			if err = db.Take(subnet.OwnerInfo).Error; err != nil {
+				log.Println("Failed to query owner info", err)
+				return
+			}
+		}
+	}
 
 	return
 }
@@ -413,59 +497,170 @@ func (v *SubnetView) New(c *macaron.Context, store session.Store) {
 	c.HTML(200, "subnets_new")
 }
 
-func ipv4MaskString(m []byte) string {
-	if len(m) != 4 {
-		return ""
+func (v *SubnetView) Edit(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
 	}
-
-	return fmt.Sprintf("%d.%d.%d.%d", m[0], m[1], m[2], m[3])
+	id := c.ParamsInt64("id")
+	if id <= 0 {
+		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	permit, err := memberShip.CheckOwner(model.Reader, "subnets", id)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	subnet := &model.Subnet{Model: model.Model{ID: id}}
+	err = DB().Take(subnet).Error
+	if err != nil {
+		log.Println("Database failed to query subnet", err)
+		return
+	}
+	routes := []*StaticRoute{}
+	err = json.Unmarshal([]byte(subnet.Routes), &routes)
+	if err != nil || len(routes) == 0 {
+		log.Println("Failed to unmarshal routes", err)
+		subnet.Routes = ""
+	} else {
+		for i, route := range routes {
+			if i == 0 {
+				subnet.Routes = fmt.Sprintf("%s:%s", route.Destination, route.Nexthop)
+			} else {
+				subnet.Routes = fmt.Sprintf("%s %s:%s", subnet.Routes, route.Destination, route.Nexthop)
+			}
+		}
+	}
+	subnet.Gateway = strings.Split(subnet.Gateway, "/")[0]
+	c.Data["Subnet"] = subnet
+	c.HTML(200, "subnets_patch")
 }
 
-func (v *SubnetView) checkRoutes(routes string) (valid bool, routeJson string) {
-	valid = false
-	netRoutes := []*NetworkRoute{}
+func (v *SubnetView) checkRoutes(network, netmask, gateway, start, end, routes string, id int64) (routeJson string, err error) {
+	if id > 0 {
+		db := DB()
+		subnet := &model.Subnet{Model: model.Model{ID: id}}
+		err = db.Take(subnet).Error
+		if err != nil {
+			log.Println("DB failed to query subnet ", err)
+			return
+		}
+		network = subnet.Network
+		netmask = subnet.Netmask
+	}
+	inNet := &net.IPNet{
+		IP:   net.ParseIP(network),
+		Mask: net.IPMask(net.ParseIP(netmask).To4()),
+	}
+	if gateway != "" && !inNet.Contains(net.ParseIP(gateway)) {
+		log.Println("Gateway not belonging to network/netmask")
+		err = fmt.Errorf("Gateway not belonging to network/netmask")
+		return
+	}
+	if start != "" && !inNet.Contains(net.ParseIP(start)) {
+		log.Println("Start not belonging to network/netmask")
+		err = fmt.Errorf("Start not belonging to network/netmask")
+		return
+	}
+	if end != "" && !inNet.Contains(net.ParseIP(end)) {
+		log.Println("End not belonging to network/netmask")
+		err = fmt.Errorf("End not belonging to network/netmask")
+		return
+	}
+	sRoutes := []*StaticRoute{}
 	if routes != "" {
 		routeList := strings.Split(routes, " ")
 		for _, route := range routeList {
 			pair := strings.Split(route, ":")
 			if len(pair) != 2 {
 				log.Println("No valid pair delimiter")
+				err = fmt.Errorf("No valid pair delimiter")
 				return
 			}
 			ipmask := pair[0]
 			if !strings.Contains(ipmask, "/") {
 				log.Println("IPmask has no slash")
+				err = fmt.Errorf("IPmask has no slash")
 				return
 			}
-			_, ipNet, err := net.ParseCIDR(ipmask)
+			_, _, err = net.ParseCIDR(ipmask)
 			if err != nil {
 				log.Println("Failed to parse cidr")
+				err = fmt.Errorf("Failed to parse cidr")
 				return
 			}
-			gateway := net.ParseIP(pair[1])
-			if gateway == nil {
-				log.Println("Gateway not in IP format")
+			nexthop := pair[1]
+			if !inNet.Contains(net.ParseIP(nexthop)) {
+				log.Println("Nexthop not belonging to network/netmask")
+				err = fmt.Errorf("Nexthop not belonging to network/netmask")
 				return
 			}
-			netmask := ipv4MaskString(ipNet.Mask)
-			if netmask == "" {
-				log.Println("Failed to get netmask")
-				return
+			netrt := &StaticRoute{
+				Destination: ipmask,
+				Nexthop:     nexthop,
 			}
-			netrt := &NetworkRoute{
-				Network: ipNet.IP.String(),
-				Netmask: netmask,
-				Gateway: gateway.String(),
-			}
-			netRoutes = append(netRoutes, netrt)
+			sRoutes = append(sRoutes, netrt)
 		}
 	}
-	jsonData, err := json.Marshal(netRoutes)
+	jsonData, err := json.Marshal(sRoutes)
 	if err == nil {
-		valid = true
 		routeJson = string(jsonData)
 	}
 	return
+}
+
+func (v *SubnetView) Patch(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	redirectTo := "../subnets"
+	id := c.ParamsInt64("id")
+	if id <= 0 {
+		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	permit, err := memberShip.CheckOwner(model.Writer, "subnets", id)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	name := c.QueryTrim("name")
+	network := c.QueryTrim("network")
+	netmask := c.QueryTrim("netmask")
+	gateway := c.QueryTrim("gateway")
+	start := c.QueryTrim("start")
+	end := c.QueryTrim("end")
+	routes := c.QueryTrim("routes")
+	log.Println("$$$$$$$$$$$$$$$$ network/netmask = ", network, netmask)
+	routeJson, err := v.checkRoutes(network, netmask, gateway, start, end, routes, id)
+	if err != nil {
+		code := http.StatusBadRequest
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	_, err = subnetAdmin.Update(c.Req.Context(), id, name, gateway, start, end, routeJson)
+	if err != nil {
+		log.Println("Create subnet failed, %v", err)
+		c.Data["ErrorMsg"] = err.Error()
+		c.HTML(500, "500")
+	}
+	c.Redirect(redirectTo)
 }
 
 func (v *SubnetView) Create(c *macaron.Context, store session.Store) {
@@ -485,15 +680,15 @@ func (v *SubnetView) Create(c *macaron.Context, store session.Store) {
 	netmask := c.QueryTrim("netmask")
 	gateway := c.QueryTrim("gateway")
 	routes := c.QueryTrim("routes")
-	valid, routeJson := v.checkRoutes(routes)
-	if !valid {
+	start := c.QueryTrim("start")
+	end := c.QueryTrim("end")
+	routeJson, err := v.checkRoutes(network, netmask, gateway, start, end, routes, 0)
+	if err != nil {
 		code := http.StatusBadRequest
 		c.Error(code, http.StatusText(code))
 		return
 	}
-	start := c.QueryTrim("start")
-	end := c.QueryTrim("end")
-	_, err := subnetAdmin.Create(c.Req.Context(), name, vlan, network, netmask, gateway, start, end, rtype, routeJson, memberShip.OrgID)
+	_, err = subnetAdmin.Create(c.Req.Context(), name, vlan, network, netmask, gateway, start, end, rtype, routeJson, memberShip.OrgID)
 	if err != nil {
 		log.Println("Create subnet failed, %v", err)
 		c.Data["ErrorMsg"] = err.Error()

@@ -46,9 +46,14 @@ func (a *FloatingIpAdmin) Create(ctx context.Context, instID int64, types []stri
 		return
 	}
 	gateway := &model.Gateway{Model: model.Model{ID: iface.Address.Subnet.Router}}
-	err = db.Model(gateway).Set("gorm:auto_preload", true).Take(gateway).Error
+	err = db.Take(gateway).Error
 	if err != nil {
 		log.Println("DB failed to query gateway", err)
+		return
+	}
+	err = db.Set("gorm:auto_preload", true).Find(&gateway.Interfaces).Error
+	if err != nil {
+		log.Println("DB failed to query interfaces", err)
 		return
 	}
 	for _, ftype := range types {
@@ -142,6 +147,16 @@ func (a *FloatingIpAdmin) List(ctx context.Context, offset, limit int64, order s
 		log.Println("DB failed to query floating ip(s), %v", err)
 		return
 	}
+	permit := memberShip.CheckPermission(model.Admin)
+	if permit {
+		for _, fip := range floatingips {
+			fip.OwnerInfo = &model.Organization{Model: model.Model{ID: fip.Owner}}
+			if err = db.Take(fip.OwnerInfo).Error; err != nil {
+				log.Println("Failed to query owner info", err)
+				return
+			}
+		}
+	}
 
 	return
 }
@@ -220,7 +235,7 @@ func (v *FloatingIpView) New(c *macaron.Context, store session.Store) {
 	db := DB()
 	where := memberShip.GetWhere()
 	instances := []*model.Instance{}
-	if err := db.Preload("Interfaces", "primary_if = ?", true).Preload("Interfaces.Address").Where(where).Find(&instances).Error; err != nil {
+	if err := db.Preload("Interfaces", "primary_if = ?", true).Preload("Interfaces.Address").Preload("Interfaces.Address.Subnet").Where(where).Find(&instances).Error; err != nil {
 		return
 	}
 	c.Data["Instances"] = instances
@@ -281,13 +296,13 @@ func AllocateFloatingIp(ctx context.Context, floatingipID, owner int64, gateway 
 		return
 	}
 	name := ftype + "fip"
-	fipIface, err = CreateInterface(ctx, subnet.ID, floatingipID, owner, "", name, "floating", nil)
+	fipIface, err = CreateInterface(ctx, subnet.ID, floatingipID, owner, "", "", name, "floating", nil)
 	if err != nil {
 		subnets := []*model.Subnet{}
 		err = db.Where("vlan = ? and id <> ?", subnet.Vlan, subnet.ID).Find(&subnets).Error
 		if err == nil && len(subnets) > 0 {
 			for _, s := range subnets {
-				fipIface, err = CreateInterface(ctx, s.ID, floatingipID, owner, "", name, "floating", nil)
+				fipIface, err = CreateInterface(ctx, s.ID, floatingipID, owner, "", "", name, "floating", nil)
 				if err == nil {
 					break
 				}

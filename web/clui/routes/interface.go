@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -141,16 +142,8 @@ func (v *InterfaceView) Edit(c *macaron.Context, store session.Store) {
 		log.Println("Image query failed", err)
 		return
 	}
-	secgroups := []*model.SecurityGroup{}
-	where := ""
-	for i, sg := range iface.Secgroups {
-		if i == 0 {
-			where = fmt.Sprintf("id != %d", sg.ID)
-		} else {
-			where = fmt.Sprintf("%s and id != %d", where, sg.ID)
-		}
-	}
-	if err := db.Where(where).Find(&secgroups).Error; err != nil {
+	_, secgroups, err := secgroupAdmin.List(c.Req.Context(), 0, 0, "")
+	if err != nil {
 		c.Data["ErrorMsg"] = err.Error()
 		c.HTML(500, "500")
 		return
@@ -233,6 +226,10 @@ func AllocateAddress(ctx context.Context, subnetID, ifaceID int64, ipaddr, addrT
 	if ipaddr == "" {
 		err = db.Set("gorm:query_option", "FOR UPDATE").Where("subnet_id = ? and allocated = ?", subnetID, false).Take(address).Error
 	} else {
+		if !strings.Contains(ipaddr, "/") {
+			preSize, _ := net.IPMask(net.ParseIP(subnet.Netmask).To4()).Size()
+			ipaddr = fmt.Sprintf("%s/%d", ipaddr, preSize)
+		}
 		err = db.Set("gorm:query_option", "FOR UPDATE").Where("subnet_id = ? and allocated = ? and address = ?", subnetID, false, ipaddr).Take(address).Error
 	}
 	if err != nil {
@@ -310,17 +307,19 @@ func genMacaddr() (mac string, err error) {
 	return mac, nil
 }
 
-func CreateInterface(ctx context.Context, subnetID, ID, owner int64, address, ifaceName, ifType string, secGroups []*model.SecurityGroup) (iface *model.Interface, err error) {
+func CreateInterface(ctx context.Context, subnetID, ID, owner int64, address, mac, ifaceName, ifType string, secGroups []*model.SecurityGroup) (iface *model.Interface, err error) {
 	var db *gorm.DB
 	ctx, db = getCtxDB(ctx)
 	primary := false
 	if ifaceName == "eth0" {
 		primary = true
 	}
-	mac, err := genMacaddr()
-	if err != nil {
-		log.Println("Failed to generate random Mac address, %v", err)
-		return
+	if mac == "" {
+		mac, err = genMacaddr()
+		if err != nil {
+			log.Println("Failed to generate random Mac address, %v", err)
+			return
+		}
 	}
 	iface = &model.Interface{
 		Model:     model.Model{Owner: owner},

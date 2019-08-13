@@ -27,14 +27,42 @@ var (
 	gatewayView  = &GatewayView{}
 )
 
+type StaticRoute struct {
+	Destination string `json:"destination"`
+	Nexthop     string `json:"nexthop"`
+}
+
 type SubnetIface struct {
-	Address string          `json:"ip_address"`
-	Vni     int64           `json:"vni"`
-	Routes  []*NetworkRoute `json:"routes,omitempty"`
+	Address string         `json:"ip_address"`
+	Vni     int64          `json:"vni"`
+	Routes  []*StaticRoute `json:"routes,omitempty"`
 }
 
 type GatewayAdmin struct{}
 type GatewayView struct{}
+
+func createGatewayIface(ctx context.Context, rtype string, gateway *model.Gateway, owner int64) (iface *model.Interface, subnet *model.Subnet, err error) {
+	db := DB()
+	subnets := []*model.Subnet{}
+	err = db.Where("type = ?", rtype).Find(&subnets).Error
+	name := ""
+	ifType := ""
+	for _, subnet = range subnets {
+		if rtype == "public" {
+			name = fmt.Sprintf("pub%d", subnet.ID)
+			ifType = "gateway_public"
+		} else if rtype == "private" {
+			name = fmt.Sprintf("pub%d", subnet.ID)
+			ifType = "gateway_private"
+		}
+		iface, err = CreateInterface(ctx, subnet.ID, gateway.ID, owner, "", "", name, ifType, nil)
+		if err == nil {
+			log.Println("Created gateway interface from subnet", err)
+			break
+		}
+	}
+	return
+}
 
 func (a *GatewayAdmin) Create(ctx context.Context, name string, pubID, priID int64, subnetIDs []int64, owner int64) (gateway *model.Gateway, err error) {
 	memberShip := GetMemberShip(ctx)
@@ -53,33 +81,47 @@ func (a *GatewayAdmin) Create(ctx context.Context, name string, pubID, priID int
 		log.Println("DB failed to create gateway, %v", err)
 		return
 	}
-	pubSubnet := &model.Subnet{Model: model.Model{ID: pubID}}
+	var pubIface *model.Interface
+	var pubSubnet *model.Subnet
 	if pubID == 0 {
-		pubSubnet.Type = "public"
+		pubIface, pubSubnet, err = createGatewayIface(ctx, "public", gateway, owner)
+		if err != nil {
+			log.Println("DB failed to create public interface", err)
+			return
+		}
+	} else {
+		pubSubnet = &model.Subnet{Model: model.Model{ID: pubID}}
+		err = db.Model(pubSubnet).Where(pubSubnet).Take(pubSubnet).Error
+		if err != nil {
+			log.Println("DB failed to query public subnet, %v", err)
+			return
+		}
+		pubIface, err = CreateInterface(ctx, pubSubnet.ID, gateway.ID, owner, "", "", fmt.Sprintf("pub%d", pubSubnet.ID), "gateway_public", nil)
+		if err != nil {
+			log.Println("DB failed to create public interface, %v", err)
+			return
+		}
 	}
-	err = db.Model(pubSubnet).Where(pubSubnet).Take(pubSubnet).Error
-	if err != nil {
-		log.Println("DB failed to query public subnet, %v", err)
-		return
-	}
-	pubIface, err := CreateInterface(ctx, pubSubnet.ID, gateway.ID, owner, "", fmt.Sprintf("pub%d", pubSubnet.ID), "gateway_public", nil)
-	if err != nil {
-		log.Println("DB failed to create public interface, %v", err)
-		return
-	}
-	priSubnet := &model.Subnet{Model: model.Model{ID: priID}}
+	var priIface *model.Interface
+	var priSubnet *model.Subnet
 	if priID == 0 {
-		priSubnet.Type = "private"
-	}
-	err = db.Model(priSubnet).Where(priSubnet).Take(priSubnet).Error
-	if err != nil {
-		log.Println("DB failed to query private subnet, %v", err)
-		return
-	}
-	priIface, err := CreateInterface(ctx, priSubnet.ID, gateway.ID, owner, "", fmt.Sprintf("pri%d", priSubnet.ID), "gateway_private", nil)
-	if err != nil {
-		log.Println("DB failed to create private interface, %v", err)
-		return
+		priIface, priSubnet, err = createGatewayIface(ctx, "private", gateway, owner)
+		if err != nil {
+			log.Println("DB failed to create private interface", err)
+			return
+		}
+	} else {
+		priSubnet := &model.Subnet{Model: model.Model{ID: priID}}
+		err = db.Model(priSubnet).Where(priSubnet).Take(priSubnet).Error
+		if err != nil {
+			log.Println("DB failed to query private subnet, %v", err)
+			return
+		}
+		priIface, err = CreateInterface(ctx, priSubnet.ID, gateway.ID, owner, "", "", fmt.Sprintf("pri%d", priSubnet.ID), "gateway_private", nil)
+		if err != nil {
+			log.Println("DB failed to create private interface, %v", err)
+			return
+		}
 	}
 	intIfaces := []*SubnetIface{}
 	for _, sID := range subnetIDs {
@@ -89,7 +131,7 @@ func (a *GatewayAdmin) Create(ctx context.Context, name string, pubID, priID int
 			log.Println("DB failed to set gateway, %v", err)
 			return
 		}
-		routes := []*NetworkRoute{}
+		routes := []*StaticRoute{}
 		err = json.Unmarshal([]byte(subnet.Routes), &routes)
 		if err != nil {
 			log.Println("Failed to unmarshal routes", err)
@@ -172,7 +214,7 @@ func (a *GatewayAdmin) Update(ctx context.Context, id int64, name string, pubID,
 				continue
 			}
 			control := fmt.Sprintf("toall=router-%d:%d,%d", gateway.ID, gateway.Hyper, gateway.Peer)
-			command := fmt.Sprintf("/opt/cloudland/scripts/backend/set_gateway.sh %d %s %d soft", gateway.ID, sub.Gateway, sub.Vlan)
+			command := fmt.Sprintf("/opt/cloudland/scripts/backend/set_routing.sh %d %s %d soft <<EOF\n%s\nEOF", gateway.ID, sub.Gateway, sub.Vlan, sub.Routes)
 			err = hyperExecute(ctx, control, command)
 			if err != nil {
 				log.Println("Set gateway failed")
@@ -290,6 +332,16 @@ func (a *GatewayAdmin) List(ctx context.Context, offset, limit int64, order stri
 		log.Println("DB failed to query gateways, %v", err)
 		return
 	}
+	permit := memberShip.CheckPermission(model.Admin)
+	if permit {
+		for _, gateway := range gateways {
+			gateway.OwnerInfo = &model.Organization{Model: model.Model{ID: gateway.Owner}}
+			if err = db.Take(gateway.OwnerInfo).Error; err != nil {
+				log.Println("Failed to query owner info", err)
+				return
+			}
+		}
+	}
 	return
 }
 
@@ -365,9 +417,8 @@ func (v *GatewayView) New(c *macaron.Context, store session.Store) {
 		c.Error(code, http.StatusText(code))
 		return
 	}
-	db := dbs.DB()
-	subnets := []*model.Subnet{}
-	if err := db.Where("id in (select subnet_id from addresses where allocated=false)").Find(&subnets).Error; err != nil {
+	_, subnets, err := subnetAdmin.List(c.Req.Context(), 0, 0, "")
+	if err != nil {
 		log.Println("DB failed to query subnets, %v", err)
 		c.Data["ErrorMsg"] = err.Error()
 		c.HTML(500, "500")
