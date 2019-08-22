@@ -285,7 +285,7 @@ func (v *UserView) LoginPost(c *macaron.Context, store session.Store) {
 	store.Set("org", organization)
 	store.Set("defsg", org.DefaultSG)
 	store.Set("members", members)
-	redirectTo := "/instances"
+	redirectTo := "/dashboard"
 	c.Redirect(redirectTo)
 }
 
@@ -376,7 +376,7 @@ func (v *UserView) Change(c *macaron.Context, store session.Store) {
 		c.Error(code, http.StatusText(code))
 		return
 	}
-	redirectTo := "/instances"
+	redirectTo := "/dashboard"
 	orgName = strings.TrimSpace(orgName)
 	if orgName != "" {
 		for _, em := range user.Members {
@@ -424,7 +424,6 @@ func (v *UserView) Patch(c *macaron.Context, store session.Store) {
 		c.Error(code, http.StatusText(code))
 		return
 	}
-	redirectTo := "../users/" + id
 	password := c.QueryTrim("password")
 	members := c.QueryStrings("members")
 	_, err = userAdmin.Update(c.Req.Context(), int64(userID), password, members)
@@ -433,8 +432,9 @@ func (v *UserView) Patch(c *macaron.Context, store session.Store) {
 		code := http.StatusInternalServerError
 		c.Error(code, http.StatusText(code))
 		return
+	} else {
+		c.HTML(200, "ok")
 	}
-	c.Redirect(redirectTo)
 }
 
 func (v *UserView) Delete(c *macaron.Context, store session.Store) (err error) {
