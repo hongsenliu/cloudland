@@ -5,9 +5,9 @@
                 {{template "_left" .}}
           	    <div class="twelve wide column content">
 		            <h4 class="ui top attached header">
-			            User Manage Panel (Total: {{.Total}})
+			            Openshift Cluster Manage Panel (Total: {{.Total}})
 			            <div class="ui right">
-				            <a class="ui green tiny button" href="/users/new">Create</a>
+				            <a class="ui green tiny button" href="openshifts/new">Create</a>
 			            </div>
 		            </h4>
 		            <div class="ui attached segment">
@@ -23,19 +23,23 @@
 	                        <thead>
 		                        <tr>
 			                        <th>ID</th>
-			                        <th>Name</th>
-			                        <th>Created At</th>
+			                        <th>Cluster Name</th>
+			                        <th>Base Domain</th>
+			                        <th>HA Masters</th>
+			                        <th>Number of Workers</th>
 			                        <th>Edit</th>
                                     <th>Delete</th>
 		                        </tr>
 	                        </thead>
 	                        <tbody>
                                 {{ $Link := .Link }}
-                                {{ range .Users }}
+                                {{ range .Openshifts }}
 		                        <tr>
 			                        <td>{{.ID}}</td>
-			                        <td>{{.Username}}</td>
-			                        <td><span title="Tue, 18 Dec 2018 14:24:59 &#43;0800">{{.CreatedAt}}</span></td>
+			                        <td>{{.ClusterName}}</td>
+			                        <td>{{.BaseDomain}}</td>
+			                        <td>{{.Haflag}}</td>
+			                        <td>{{.WorkerNum}}</td>
 			                        <td><a href="{{$Link}}/{{.ID}}"><i class="fa fa-pencil-square-o"></i></a></td>
                                     <td><div class="delete-button" data-url="{{$Link}}/{{.ID}}" data-id="{{.ID}}"><i class="dark purple trash alternate outline icon"></i></div></td>
 		                        </tr>
@@ -61,10 +65,10 @@
     <div class="ui small basic delete modal">
 	    <div class="ui icon header">
 		    <i class="trash icon"></i>
-            User Deletion
+            Openshift Cluster Deletion
 	    </div>
 	    <div class="content">
-		    <p>This user is going to be deleted permanently, do you want to continue?</p>
+		    <p>This openshift cluster is going to be deleted permanently, do you want to continue?</p>
 	    </div>
 	    {{template "_delete_modal_actions" .}}
     </div>

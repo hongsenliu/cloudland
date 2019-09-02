@@ -13,7 +13,7 @@
 		            <div class="ui attached segment">
 			            <form class="ui form">
 	                        <div class="ui fluid tiny action input">
-	                            <input name="q" value="" placeholder="Search..." autofocus>
+	                            <input name="q" value="{{ .Query }}" placeholder="Search..." autofocus>
 	                            <button class="ui blue tiny button">Search</button>
 	                        </div>
                         </form>
@@ -45,12 +45,23 @@
 			                        <td>{{.Swap}}</td>
 			                        <td><span title="Tue, 18 Dec 2018 14:24:59 &#43;0800">{{.CreatedAt}}</span></td>
 			                        <td><a href="{{$Link}}/{{.ID}}"><i class="fa fa-pencil-square-o"></i></a></td>
-                                    <td><div class="ui red tiny button delete-button" data-url="{{$Link}}/{{.ID}}" data-id="{{.ID}}">Delete</div></td>
+                                    <td><div class="delete-button" data-url="{{$Link}}/{{.ID}}" data-id="{{.ID}}"><i class="dark purple trash alternate outline icon"></i></div></td>
 		                        </tr>
                                 {{ end }}
 	                        </tbody>
                         </table>
 		            </div>
+		            <div class="ui attached segment">
+                                 {{ if .Pages}}
+                                 <div class="ui pagination menu">
+                                     {{ range  $index, $element := .Pages }}
+                                         <a class="active item">
+                                             <a href="{{$Link}}?offset={{$element.Offset}}">{{ $element.Number }}</a>
+                                         </a>
+                                     {{ end }}
+                                 </div>
+                                 {{ end }}
+	                    </div>
 	            </div>
             </div>
         </div>

@@ -27,6 +27,12 @@ var (
 	floatingipView  = &FloatingIpView{}
 )
 
+type FloatingIps struct {
+	Instance  int64  `json:"instance"`
+	PublicIp  string `json:"public_ip"`
+	PrivateIp string `json:"private_ip"`
+}
+
 type FloatingIpAdmin struct{}
 type FloatingIpView struct{}
 
@@ -125,7 +131,7 @@ func (a *FloatingIpAdmin) Delete(ctx context.Context, id int64) (err error) {
 	return
 }
 
-func (a *FloatingIpAdmin) List(ctx context.Context, offset, limit int64, order string) (total int64, floatingips []*model.FloatingIp, err error) {
+func (a *FloatingIpAdmin) List(ctx context.Context, offset, limit int64, order, query string) (total int64, floatingips []*model.FloatingIp, err error) {
 	memberShip := GetMemberShip(ctx)
 	db := DB()
 	if limit == 0 {
@@ -135,20 +141,24 @@ func (a *FloatingIpAdmin) List(ctx context.Context, offset, limit int64, order s
 	if order == "" {
 		order = "created_at"
 	}
+	if query != "" {
+		query = fmt.Sprintf("fip_address like '%%%s%%' or int_address like '%%%s%%'", query, query)
+	}
 
 	where := memberShip.GetWhere()
 	floatingips = []*model.FloatingIp{}
-	if err = db.Model(&model.FloatingIp{}).Where(where).Count(&total).Error; err != nil {
+	if err = db.Model(&model.FloatingIp{}).Where(where).Where(query).Count(&total).Error; err != nil {
 		log.Println("DB failed to count floating ip(s), %v", err)
 		return
 	}
 	db = dbs.Sortby(db.Offset(offset).Limit(limit), order)
-	if err = db.Set("gorm:auto_preload", true).Where(where).Find(&floatingips).Error; err != nil {
+	if err = db.Set("gorm:auto_preload", true).Where(where).Where(query).Find(&floatingips).Error; err != nil {
 		log.Println("DB failed to query floating ip(s), %v", err)
 		return
 	}
 	permit := memberShip.CheckPermission(model.Admin)
 	if permit {
+		db = db.Offset(0).Limit(-1)
 		for _, fip := range floatingips {
 			fip.OwnerInfo = &model.Organization{Model: model.Model{ID: fip.Owner}}
 			if err = db.Take(fip.OwnerInfo).Error; err != nil {
@@ -172,11 +182,15 @@ func (v *FloatingIpView) List(c *macaron.Context, store session.Store) {
 	}
 	offset := c.QueryInt64("offset")
 	limit := c.QueryInt64("limit")
+	if limit == 0 {
+		limit = 10
+	}
 	order := c.Query("order")
 	if order == "" {
 		order = "-created_at"
 	}
-	total, floatingips, err := floatingipAdmin.List(c.Req.Context(), offset, limit, order)
+	query := c.QueryTrim("q")
+	total, floatingips, err := floatingipAdmin.List(c.Req.Context(), offset, limit, order, query)
 	if err != nil {
 		log.Println("Failed to list floating ip(s), %v", err)
 		c.Data["ErrorMsg"] = err.Error()
@@ -185,6 +199,8 @@ func (v *FloatingIpView) List(c *macaron.Context, store session.Store) {
 	}
 	c.Data["FloatingIps"] = floatingips
 	c.Data["Total"] = total
+	c.Data["Pages"] = GetPages(total, limit)
+	c.Data["Query"] = query
 	c.HTML(200, "floatingips")
 }
 
@@ -252,16 +268,9 @@ func (v *FloatingIpView) Create(c *macaron.Context, store session.Store) {
 		return
 	}
 	redirectTo := "../floatingips"
-	instance := c.Query("instance")
-	ftype := c.Query("ftype")
-	instID, err := strconv.Atoi(instance)
-	if err != nil {
-		log.Println("Invalid interface ID", err)
-		code := http.StatusBadRequest
-		c.Error(code, http.StatusText(code))
-		return
-	}
-	permit, err = memberShip.CheckOwner(model.Writer, "instances", int64(instID))
+	instID := c.QueryInt64("instance")
+	ftype := c.QueryTrim("ftype")
+	permit, err := memberShip.CheckOwner(model.Writer, "instances", int64(instID))
 	if !permit {
 		log.Println("Not authorized for this operation")
 		code := http.StatusUnauthorized
@@ -279,6 +288,43 @@ func (v *FloatingIpView) Create(c *macaron.Context, store session.Store) {
 		c.HTML(500, "500")
 	}
 	c.Redirect(redirectTo)
+}
+
+func (v *FloatingIpView) Assign(c *macaron.Context, store session.Store) {
+	memberShip := GetMemberShip(c.Req.Context())
+	permit := memberShip.CheckPermission(model.Writer)
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	instID := c.QueryInt64("instance")
+	log.Println("$$$$$$$$$$$$$$$$$$$$$$$$$$$ instID = ", instID)
+	permit, err := memberShip.CheckOwner(model.Writer, "instances", int64(instID))
+	if !permit {
+		log.Println("Not authorized for this operation")
+		code := http.StatusUnauthorized
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	types := []string{"public", "private"}
+	floatingips, err := floatingipAdmin.Create(c.Req.Context(), int64(instID), types)
+	if err != nil {
+		log.Println("Failed to create floating ip", err)
+		code := http.StatusInternalServerError
+		c.Error(code, http.StatusText(code))
+		return
+	}
+	fipsData := &FloatingIps{Instance: instID}
+	for _, fip := range floatingips {
+		if fip.Type == "public" {
+			fipsData.PublicIp = fip.FipAddress
+		} else if fip.Type == "private" {
+			fipsData.PrivateIp = fip.FipAddress
+		}
+	}
+	c.JSON(200, fipsData)
 }
 
 func AllocateFloatingIp(ctx context.Context, floatingipID, owner int64, gateway *model.Gateway, ftype string) (fipIface *model.Interface, err error) {

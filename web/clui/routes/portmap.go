@@ -115,7 +115,7 @@ func (a *PortmapAdmin) Delete(ctx context.Context, id int64) (err error) {
 	return
 }
 
-func (a *PortmapAdmin) List(ctx context.Context, offset, limit int64, order string) (total int64, portmaps []*model.Portmap, err error) {
+func (a *PortmapAdmin) List(ctx context.Context, offset, limit int64, order, query string) (total int64, portmaps []*model.Portmap, err error) {
 	memberShip := GetMemberShip(ctx)
 	db := DB()
 	if limit == 0 {
@@ -126,19 +126,23 @@ func (a *PortmapAdmin) List(ctx context.Context, offset, limit int64, order stri
 		order = "created_at"
 	}
 
+	if query != "" {
+		query = fmt.Sprintf("name like '%%%s%%'", query)
+	}
 	where := memberShip.GetWhere()
 	portmaps = []*model.Portmap{}
-	if err = db.Model(&model.Portmap{}).Where(where).Count(&total).Error; err != nil {
+	if err = db.Model(&model.Portmap{}).Where(where).Where(query).Count(&total).Error; err != nil {
 		log.Println("DB failed to count portmap(s), %v", err)
 		return
 	}
 	db = dbs.Sortby(db.Offset(offset).Limit(limit), order)
-	if err = db.Where(where).Find(&portmaps).Error; err != nil {
+	if err = db.Where(where).Where(query).Find(&portmaps).Error; err != nil {
 		log.Println("DB failed to query portmap(s), %v", err)
 		return
 	}
 	permit := memberShip.CheckPermission(model.Admin)
 	if permit {
+		db = db.Offset(0).Limit(-1)
 		for _, pmap := range portmaps {
 			pmap.OwnerInfo = &model.Organization{Model: model.Model{ID: pmap.Owner}}
 			if err = db.Take(pmap.OwnerInfo).Error; err != nil {
@@ -162,11 +166,15 @@ func (v *PortmapView) List(c *macaron.Context, store session.Store) {
 	}
 	offset := c.QueryInt64("offset")
 	limit := c.QueryInt64("limit")
+	if limit == 0 {
+		limit = 10
+	}
 	order := c.QueryTrim("order")
 	if order == "" {
 		order = "-created_at"
 	}
-	total, portmaps, err := portmapAdmin.List(c.Req.Context(), offset, limit, order)
+	query := c.QueryTrim("q")
+	total, portmaps, err := portmapAdmin.List(c.Req.Context(), offset, limit, order, query)
 	if err != nil {
 		log.Println("Failed to list portmap(s), %v", err)
 		c.Data["ErrorMsg"] = err.Error()
@@ -175,6 +183,8 @@ func (v *PortmapView) List(c *macaron.Context, store session.Store) {
 	}
 	c.Data["Portmaps"] = portmaps
 	c.Data["Total"] = total
+	c.Data["Pages"] = GetPages(total, limit)
+	c.Data["Query"] = query
 	c.HTML(200, "portmaps")
 }
 

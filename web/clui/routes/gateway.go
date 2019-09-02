@@ -310,7 +310,7 @@ func (a *GatewayAdmin) Delete(ctx context.Context, id int64) (err error) {
 	return
 }
 
-func (a *GatewayAdmin) List(ctx context.Context, offset, limit int64, order string) (total int64, gateways []*model.Gateway, err error) {
+func (a *GatewayAdmin) List(ctx context.Context, offset, limit int64, order, query string) (total int64, gateways []*model.Gateway, err error) {
 	memberShip := GetMemberShip(ctx)
 	db := DB()
 	if limit == 0 {
@@ -321,19 +321,23 @@ func (a *GatewayAdmin) List(ctx context.Context, offset, limit int64, order stri
 		order = "created_at"
 	}
 
+	if query != "" {
+		query = fmt.Sprintf("name like '%%%s%%'", query)
+	}
 	where := memberShip.GetWhere()
 	gateways = []*model.Gateway{}
-	if err = db.Model(&model.Gateway{}).Where(where).Count(&total).Error; err != nil {
+	if err = db.Model(&model.Gateway{}).Where(where).Where(query).Count(&total).Error; err != nil {
 		log.Println("DB failed to count gateway, %v", err)
 		return
 	}
 	db = dbs.Sortby(db.Offset(offset).Limit(limit), order)
-	if err = db.Set("gorm:auto_preload", true).Where(where).Find(&gateways).Error; err != nil {
+	if err = db.Set("gorm:auto_preload", true).Where(where).Where(query).Find(&gateways).Error; err != nil {
 		log.Println("DB failed to query gateways, %v", err)
 		return
 	}
 	permit := memberShip.CheckPermission(model.Admin)
 	if permit {
+		db = db.Offset(0).Limit(-1)
 		for _, gateway := range gateways {
 			gateway.OwnerInfo = &model.Organization{Model: model.Model{ID: gateway.Owner}}
 			if err = db.Take(gateway.OwnerInfo).Error; err != nil {
@@ -356,11 +360,15 @@ func (v *GatewayView) List(c *macaron.Context, store session.Store) {
 	}
 	offset := c.QueryInt64("offset")
 	limit := c.QueryInt64("limit")
+	if limit == 0 {
+		limit = 10
+	}
 	order := c.QueryTrim("order")
 	if order == "" {
 		order = "-created_at"
 	}
-	total, gateways, err := gatewayAdmin.List(c.Req.Context(), offset, limit, order)
+	query := c.QueryTrim("q")
+	total, gateways, err := gatewayAdmin.List(c.Req.Context(), offset, limit, order, query)
 	if err != nil {
 		log.Println("Failed to list gateways, %v", err)
 		c.Data["ErrorMsg"] = err.Error()
@@ -369,6 +377,8 @@ func (v *GatewayView) List(c *macaron.Context, store session.Store) {
 	}
 	c.Data["Gateways"] = gateways
 	c.Data["Total"] = total
+	c.Data["Pages"] = GetPages(total, limit)
+	c.Data["Query"] = query
 	c.HTML(200, "gateways")
 }
 
@@ -417,7 +427,7 @@ func (v *GatewayView) New(c *macaron.Context, store session.Store) {
 		c.Error(code, http.StatusText(code))
 		return
 	}
-	_, subnets, err := subnetAdmin.List(c.Req.Context(), 0, 0, "")
+	_, subnets, err := subnetAdmin.List(c.Req.Context(), 0, -1, "", "")
 	if err != nil {
 		log.Println("DB failed to query subnets, %v", err)
 		c.Data["ErrorMsg"] = err.Error()
@@ -456,7 +466,7 @@ func (v *GatewayView) Edit(c *macaron.Context, store session.Store) {
 	for _, gsub := range gateway.Subnets {
 		where = fmt.Sprintf("%s and id != %d", where, gsub.ID)
 	}
-	if err := db.Where(where).Find(&subnets).Error; err != nil {
+	if err := db.Where(where).Where(memberShip.GetWhere()).Find(&subnets).Error; err != nil {
 		log.Println("DB failed to query subnets, %v", err)
 		c.Data["ErrorMsg"] = err.Error()
 		c.HTML(500, "500")

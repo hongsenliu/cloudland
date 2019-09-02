@@ -1,0 +1,82 @@
+{{template "_head" .}}
+<div class="user signup">
+	<div class="ui middle very relaxed page grid">
+        <div class="column" >
+            <form class="ui form" action="{{.Link}}" method="post">
+                <h3 class="ui top attached header">
+                    Create New Openshift Cluster
+                </h3>
+                <div class="ui attached segment">
+                    <div class="required inline field">
+                        <label for="clustername">Cluster Name</label>
+                        <input id="clustername" name="clustername" autofocus required>
+                    </div>
+                    <div class="required inline field">
+                        <label for="basedomain">Base Domain</label>
+                        <input id="basedomain"  name="basedomain" required>
+                    </div>
+                    <div class="inline field">
+                        <label for="haflag">High Available</label>
+						<div class="ui selection dropdown">
+						  <input id="haflag" name="haflag" type="hidden">
+						  <i class="dropdown icon"></i>
+						  <div class="default text">no</div>
+						  <div class="menu">
+							<div class="item" data-value="no" data-text="no">
+							  no
+							</div>
+							<div class="item" data-value="yes" data-text="yes">
+							  yes
+							</div>
+						  </div>
+						</div>
+                    </div>
+                    <div class="required inline field">
+                        <label for="nworkers">Number of Workers</label>
+                        <input id="nworker"  name="nworkers" value="2" required>
+                    </div>
+                    <div class="required inline field">
+                        <label for="flavor">Flavor</label>
+						<div class="ui selection dropdown">
+						  <input id="flavor" name="flavor" type="hidden">
+						  <i class="dropdown icon"></i>
+						  <div class="default text">Flavor</div>
+						  <div class="menu">
+                            {{ range .Flavors }}
+							<div class="item" data-value={{.ID}} data-text={{.Name}}>
+							  {{.Name}}
+							</div>
+                            {{ end }}
+						  </div>
+						</div>
+                    </div>
+                    <div class="required inline field">
+                        <label for="key">Key</label>
+						<div class="ui multiple selection dropdown">
+						  <input id="key" name="key" type="hidden">
+						  <i class="dropdown icon"></i>
+						  <div class="default text">Key</div>
+						  <div class="menu">
+                            {{ range .Keys }}
+							<div class="item" data-value={{.ID}} data-text={{.Name}}>
+							  {{.Name}}
+							</div>
+                            {{ end }}
+						  </div>
+						</div>
+                    </div>
+                    <div class="required inline field">
+						<label>Pull Secret</label>
+						<textarea id="secret" name="secret" autocomplete="off" required></textarea>
+                    </div>
+                    <div class="inline field">
+                        <label></label>
+                        <button class="ui green button">Create New Openshift Cluster</button>
+                    </div>
+                </div>
+            </form>
+        </div>
+	</div>
+</div>
+{{template "_footer" .}}
+

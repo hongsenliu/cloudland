@@ -118,17 +118,20 @@ func (a *UserAdmin) Update(ctx context.Context, id int64, password string, membe
 	return
 }
 
-func (a *UserAdmin) List(ctx context.Context, offset, limit int64, order string) (total int64, users []*model.User, err error) {
+func (a *UserAdmin) List(ctx context.Context, offset, limit int64, order, query string) (total int64, users []*model.User, err error) {
 	memberShip := GetMemberShip(ctx)
 	db := DB()
 	if limit == 0 {
-		limit = 20
+		limit = 10
 	}
 
 	if order == "" {
 		order = "created_at"
 	}
 
+	if query != "" {
+		query = fmt.Sprintf("username like '%%%s%%'", query)
+	}
 	if memberShip.Role != model.Admin {
 		org := &model.Organization{Model: model.Model{ID: memberShip.OrgID}}
 		if err = db.Set("gorm:auto_preload", true).Take(org).Error; err != nil {
@@ -142,13 +145,20 @@ func (a *UserAdmin) List(ctx context.Context, offset, limit int64, order string)
 				userIDs = append(userIDs, member.UserID)
 			}
 		}
+		if err = db.Model(&model.User{}).Where(userIDs).Where(query).Count(&total).Error; err != nil {
+			return
+		}
 		db = dbs.Sortby(db.Offset(offset).Limit(limit), order)
-		if err = db.Where(userIDs).Find(&users).Error; err != nil {
+		if err = db.Where(userIDs).Where(query).Find(&users).Error; err != nil {
 			log.Println("DB failed to get user list, %v", err)
 			return
 		}
 	} else {
-		if err = db.Find(&users).Error; err != nil {
+		if err = db.Model(&model.User{}).Where(query).Count(&total).Error; err != nil {
+			return
+		}
+		db = dbs.Sortby(db.Offset(offset).Limit(limit), order)
+		if err = db.Where(query).Find(&users).Error; err != nil {
 			log.Println("DB failed to get user list, %v", err)
 			return
 		}
@@ -300,11 +310,15 @@ func (v *UserView) List(c *macaron.Context, store session.Store) {
 	}
 	offset := c.QueryInt64("offset")
 	limit := c.QueryInt64("limit")
+	if limit == 0 {
+		limit = 10
+	}
 	order := c.QueryTrim("order")
 	if order == "" {
 		order = "-created_at"
 	}
-	total, users, err := userAdmin.List(c.Req.Context(), offset, limit, order)
+	query := c.QueryTrim("q")
+	total, users, err := userAdmin.List(c.Req.Context(), offset, limit, order, query)
 	if err != nil {
 		log.Println("Failed to list user(s)", err)
 		c.Data["ErrorMsg"] = err.Error()
@@ -313,6 +327,8 @@ func (v *UserView) List(c *macaron.Context, store session.Store) {
 	}
 	c.Data["Users"] = users
 	c.Data["Total"] = total
+	c.Data["Pages"] = GetPages(total, limit)
+	c.Data["Query"] = query
 	c.HTML(200, "users")
 }
 

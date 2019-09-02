@@ -21,6 +21,7 @@ import (
 
 	"github.com/IBM/cloudland/web/clui/model"
 	"github.com/go-macaron/session"
+	_ "github.com/go-macaron/session/postgres"
 	"github.com/spf13/viper"
 	"gopkg.in/macaron.v1"
 )
@@ -51,7 +52,11 @@ func Run() (err error) {
 
 func New() (m *macaron.Macaron) {
 	m = macaron.Classic()
-	m.Use(session.Sessioner())
+	m.Use(session.Sessioner(session.Options{
+		IDLength:       16,
+		Provider:       "postgres",
+		ProviderConfig: viper.GetString("db.uri"),
+	}))
 	m.Use(macaron.Renderer(
 		macaron.RenderOptions{
 			Funcs: []template.FuncMap{
@@ -64,7 +69,8 @@ func New() (m *macaron.Macaron) {
 	))
 	m.Use(LinkHandler)
 	m.Get("/", Index)
-	m.Get("/dashboard", Dashboard)
+	m.Get("/dashboard", dashboard.Show)
+	m.Get("/dashboard/getdata", dashboard.GetData)
 	m.Get("/login", userView.LoginGet)
 	m.Post("/login", userView.LoginPost)
 	m.Get("/users", userView.List)
@@ -84,6 +90,10 @@ func New() (m *macaron.Macaron) {
 	m.Get("/instances/new", instanceView.New)
 	m.Post("/instances/new", instanceView.Create)
 	m.Delete("/instances/:id", instanceView.Delete)
+	m.Get("/openshifts", openshiftView.List)
+	m.Get("/openshifts/new", openshiftView.New)
+	m.Post("/openshifts/new", openshiftView.Create)
+	m.Delete("/openshifts/:id", openshiftView.Delete)
 	m.Get("/instances/:id", instanceView.Edit)
 	m.Post("/instances/:id", instanceView.Patch)
 	m.Get("/interfaces/:id", interfaceView.Edit)
@@ -115,6 +125,7 @@ func New() (m *macaron.Macaron) {
 	m.Get("/floatingips", floatingipView.List)
 	m.Get("/floatingips/new", floatingipView.New)
 	m.Post("/floatingips/new", floatingipView.Create)
+	m.Post("/floatingips/assign", floatingipView.Assign)
 	m.Delete("/floatingips/:id", floatingipView.Delete)
 	m.Get("/portmaps", portmapView.List)
 	m.Get("/portmaps/new", portmapView.New)
@@ -153,6 +164,7 @@ func LinkHandler(c *macaron.Context, store session.Store) {
 	log.Println(link)
 	c.Data["Link"] = link
 	if login, ok := store.Get("login").(string); ok {
+		// log.Println("$$$$$$$$$$$$$$$$$$", c.GetCookie("MacaronSession"))
 		memberShip := &MemberShip{
 			OrgID:    store.Get("oid").(int64),
 			UserID:   store.Get("uid").(int64),

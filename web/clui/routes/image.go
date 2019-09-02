@@ -95,7 +95,7 @@ func (a *ImageAdmin) Delete(ctx context.Context, id int64) (err error) {
 	return
 }
 
-func (a *ImageAdmin) List(offset, limit int64, order string) (total int64, images []*model.Image, err error) {
+func (a *ImageAdmin) List(offset, limit int64, order, query string) (total int64, images []*model.Image, err error) {
 	db := DB()
 	if limit == 0 {
 		limit = 20
@@ -105,12 +105,15 @@ func (a *ImageAdmin) List(offset, limit int64, order string) (total int64, image
 		order = "created_at"
 	}
 
+	if query != "" {
+		query = fmt.Sprintf("name like '%%%s%%'", query)
+	}
 	images = []*model.Image{}
-	if err = db.Model(&model.Image{}).Count(&total).Error; err != nil {
+	if err = db.Model(&model.Image{}).Where(query).Count(&total).Error; err != nil {
 		return
 	}
 	db = dbs.Sortby(db.Offset(offset).Limit(limit), order)
-	if err = db.Find(&images).Error; err != nil {
+	if err = db.Where(query).Find(&images).Error; err != nil {
 		return
 	}
 
@@ -128,11 +131,15 @@ func (v *ImageView) List(c *macaron.Context, store session.Store) {
 	}
 	offset := c.QueryInt64("offset")
 	limit := c.QueryInt64("limit")
+	if limit == 0 {
+		limit = 10
+	}
 	order := c.QueryTrim("order")
 	if order == "" {
 		order = "-created_at"
 	}
-	total, images, err := imageAdmin.List(offset, limit, order)
+	query := c.QueryTrim("q")
+	total, images, err := imageAdmin.List(offset, limit, order, query)
 	if err != nil {
 		c.Data["ErrorMsg"] = err.Error()
 		c.HTML(500, "500")
@@ -140,6 +147,8 @@ func (v *ImageView) List(c *macaron.Context, store session.Store) {
 	}
 	c.Data["Images"] = images
 	c.Data["Total"] = total
+	c.Data["Pages"] = GetPages(total, limit)
+	c.Data["Query"] = query
 	c.HTML(200, "images")
 }
 
@@ -185,7 +194,7 @@ func (v *ImageView) New(c *macaron.Context, store session.Store) {
 		c.Error(code, http.StatusText(code))
 		return
 	}
-	_, instances, err := instanceAdmin.List(c.Req.Context(), 0, 0, "")
+	_, instances, err := instanceAdmin.List(c.Req.Context(), 0, -1, "", "")
 	if err != nil {
 		c.Data["ErrorMsg"] = err.Error()
 		c.HTML(500, "500")
